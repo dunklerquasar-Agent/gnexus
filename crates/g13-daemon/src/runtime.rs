@@ -38,6 +38,8 @@ pub struct RuntimeOptions {
     pub auto_switch: bool,
     /// G-key that opens the GUI overlay instead of its binding.
     pub overlay_key: Option<g13_core::G13Key>,
+    /// Application-wide G13 stick-mouse speed, as percent (10..=200).
+    pub stick_mouse_speed: u16,
     /// Also drive a Logitech HID++ mouse (G502 X PLUS…).
     pub mouse: bool,
     /// Also drive a Logitech HID++ headset (PRO X Wireless…).
@@ -46,7 +48,7 @@ pub struct RuntimeOptions {
 
 impl Default for RuntimeOptions {
     fn default() -> Self {
-        Self { dry_run: false, poll: false, profiles_dir: None, auto_switch: true, overlay_key: None, mouse: true, headset: true }
+        Self { dry_run: false, poll: false, profiles_dir: None, auto_switch: true, overlay_key: None, stick_mouse_speed: 100, mouse: true, headset: true }
     }
 }
 
@@ -61,6 +63,8 @@ pub enum Request {
     Preview(Option<String>),
     /// Change the G-key reserved for the overlay.
     SetOverlayKey(Option<g13_core::G13Key>),
+    /// Change the global stick-mouse speed on the engine thread.
+    SetStickMouseSpeed(u16),
     /// "Test everywhere": force this profile in every application
     /// (`None` = automatic switching again).
     Pin(Option<String>),
@@ -123,6 +127,7 @@ impl Runtime {
         );
         let mut engine = Engine::new(injector.clone(), cmd_tx, profile);
         engine.set_overlay_key(opts.overlay_key);
+        engine.set_stick_mouse_speed(opts.stick_mouse_speed);
         let mut lcd = LcdManager::new(engine.subscribe());
         let lcd_lang = lcd.language();
         let ui = engine.subscribe();
@@ -174,6 +179,7 @@ impl Runtime {
                             Request::RescanProfiles => profiles.rescan(e),
                             Request::Preview(id) => profiles.set_preview(id),
                             Request::SetOverlayKey(k) => e.set_overlay_key(k),
+                            Request::SetStickMouseSpeed(speed) => e.set_stick_mouse_speed(speed),
                             Request::Pin(id) => profiles.set_pinned(id),
                             Request::Emit(ev) => e.emit(ev),
                         }

@@ -213,8 +213,12 @@ const Device = {
     add("pad-ctl", null, CARD.x + 14, 682, CARD.w - 28, 30,
       `<button data-target="left" title="${t("Le stick du G13 pilote le joystick gauche de la manette (déplacement)")}">${t("GAUCHE")}</button>` +
       `<button data-target="right" title="${t("Le stick du G13 pilote le joystick droit de la manette (caméra)")}">${t("DROIT")}</button>`);
+    add("mouse-speed-ctl", null, CARD.x + 10, 680, CARD.w - 20, 52,
+      `<label class="dz-val" for="mouse-speed"><span id="mouse-speed-scope">${t("VITESSE GLOBALE :")}</span> <b id="mouse-speed-val">100 %</b></label>` +
+      `<div class="mouse-speed-row"><input type="range" id="mouse-speed" min="10" max="200" step="10" value="100" title="${t("Vitesse globale pour tous les profils sans réglage propre (ancien prototype).")}">` +
+      `<button type="button" id="mouse-speed-reset" title="${t("Rétablir la vitesse par défaut")}">↺</button></div>`);
     add("dz-ctl", null, CARD.x + 10, 696, CARD.w - 20, 70,
-      `<div class="dz-val">${t("ZONE MORTE :")} <b id="dz-val">35 %</b></div><input type="range" id="deadzone" min="5" max="90" value="35">`);
+      `<label class="dz-val" for="deadzone" title="${t("Zone morte commune aux trois menus de ce profil")}">${t("ZONE MORTE :")} <b id="dz-val">35 %</b></label><input type="range" id="deadzone" min="5" max="90" value="35" title="${t("Zone morte commune aux trois menus de ce profil")}">`);
   },
 
   /** Fit the 760×820 design space into the wrapper. */

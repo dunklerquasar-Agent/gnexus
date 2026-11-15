@@ -40,7 +40,7 @@ It runs in the notification area, needs no Logitech software, and keeps working 
 - Every key remappable: keys and shortcuts, mouse buttons and wheel, macros, multi-state keys (tap / hold / double tap)
 - Three banks (M1–M3) with their own backlight colour, profiles per application (switched automatically with the game in the foreground)
 - Macros: editor, library, recording with the RECORD (MR) key
-- Stick as four keys, or as the analog stick of a virtual Xbox 360 controller
+- Stick as four keys, as the analog stick of a virtual Xbox 360 controller, or as an [experimental mouse pointer](docs/G13_STICK_MOUSE.md)
 - LCD screen applets: clock, system monitor, now playing (media controls), profile picker
 - In-game overlay to edit keys without leaving the game
 - Import / export of Logitech Gaming Software profiles (`.xml`)

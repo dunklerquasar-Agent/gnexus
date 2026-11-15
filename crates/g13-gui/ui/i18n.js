@@ -55,6 +55,21 @@ const TR = {
   "Profil importé, mais l'affichage n'a pas changé ; vérifiez le brouillon.": [
     "Profile imported, but the view did not change; check the draft.", "Profil importiert, aber die Ansicht wurde nicht gewechselt; prüfen Sie den Entwurf.",
     "Profilo importato, ma la vista non è cambiata; verifica la bozza.", "Perfil importado, pero la vista no cambió; comprueba el borrador."],
+  "Mode souris et vitesse du stick non exportés ; les directions enregistrées peuvent devenir actives.": [
+    "Stick mouse mode and speed are not exported; stored direction bindings may become active.",
+    "Stick-Mausmodus und -geschwindigkeit werden nicht exportiert; gespeicherte Richtungsbelegungen können aktiv werden.",
+    "La modalità mouse e la velocità dello stick non vengono esportate; le direzioni salvate potrebbero attivarsi.",
+    "El modo ratón y la velocidad del stick no se exportan; las direcciones guardadas podrían activarse."],
+  "Mode manette du stick non exporté ; les directions enregistrées peuvent devenir actives.": [
+    "Stick gamepad mode is not exported; stored direction bindings may become active.",
+    "Der Gamepad-Modus des Sticks wird nicht exportiert; gespeicherte Richtungsbelegungen können aktiv werden.",
+    "La modalità gamepad dello stick non viene esportata; le direzioni salvate potrebbero attivarsi.",
+    "El modo mando del stick no se exporta; las direcciones guardadas podrían activarse."],
+  "Zone morte et/ou cible manette du stick non exportées.": [
+    "The stick dead zone and/or gamepad target are not exported.",
+    "Stick-Totzone und/oder Gamepad-Ziel werden nicht exportiert.",
+    "La zona morta e/o la destinazione gamepad dello stick non vengono esportate.",
+    "La zona muerta y/o el destino de mando del stick no se exportan."],
   "Fermeture annulée : terminez le dialogue ou corrigez les modifications non enregistrées.": [
     "Close cancelled: finish the dialog or fix unsaved changes.",
     "Schließen abgebrochen: Dialog abschließen oder nicht gespeicherte Änderungen beheben.",
@@ -69,6 +84,11 @@ const TR = {
   "Actualisation annulée : des modifications n'ont pas pu être enregistrées.": [
     "Reload cancelled: some changes could not be saved.", "Neuladen abgebrochen: Änderungen konnten nicht gespeichert werden.",
     "Ricaricamento annullato: alcune modifiche non sono state salvate.", "Recarga cancelada: algunos cambios no se pudieron guardar."],
+  "Vitesse modifiée pendant l'import : vérifiez et réessayez.": [
+    "Speed changed during import: check and try again.",
+    "Das Tempo wurde während des Imports geändert: prüfen und erneut versuchen.",
+    "La velocità è cambiata durante l'importazione: verifica e riprova.",
+    "La velocidad cambió durante la importación: comprueba y vuelve a intentarlo."],
   // Small draft-recovery panel (only shown when a save is blocked).
   "VOIR LE BROUILLON": ["VIEW DRAFT", "ENTWURF ANZEIGEN", "MOSTRA BOZZA", "VER BORRADOR"],
   "BROUILLON NON ENREGISTRÉ": ["UNSAVED DRAFT", "NICHT GESPEICHERTER ENTWURF", "BOZZA NON SALVATA", "BORRADOR NO GUARDADO"],
@@ -120,6 +140,8 @@ const TR = {
     "Stick im Gamepad-Modus: er wird zum Analogstick eines virtuellen Xbox-360-Controllers",
     "Stick in modalità controller: diventa la levetta analogica di un controller Xbox 360 virtuale",
     "Stick en modo mando: se convierte en el joystick analógico de un mando Xbox 360 virtual"],
+  "Stick en mode souris : déplace le pointeur": ["Stick in mouse mode: moves the pointer", "Stick im Mausmodus: bewegt den Mauszeiger",
+    "Stick in modalità mouse: sposta il puntatore", "Stick en modo ratón: mueve el puntero"],
   "Fermer": ["Close", "Schließen", "Chiudi", "Cerrar"],
   "PROFIL": ["PROFILE", "PROFIL", "PROFILO", "PERFIL"],
   "PROFIL {n}": ["PROFILE {n}", "PROFIL {n}", "PROFILO {n}", "PERFIL {n}"],
@@ -142,6 +164,9 @@ const TR = {
   "UTILISER PAR DÉFAUT": ["USE AS DEFAULT", "ALS STANDARD VERWENDEN", "USA COME PREDEFINITO", "USAR COMO PREDETERMINADO"],
   "ASSOCIER À UN JEU": ["LINK TO A GAME", "MIT EINEM SPIEL VERKNÜPFEN", "ASSOCIA A UN GIOCO", "ASOCIAR A UN JUEGO"],
   "MODE STICK": ["STICK MODE", "STICK-MODUS", "MODALITÀ STICK", "MODO STICK"],
+  "MODE STICK · {bank}": ["STICK MODE · {bank}", "STICK-MODUS · {bank}", "MODALITÀ STICK · {bank}", "MODO STICK · {bank}"],
+  "Zone morte commune aux trois menus de ce profil": ["Dead zone shared by all three banks of this profile", "Totzone für alle drei M-Ebenen dieses Profils",
+    "Zona morta condivisa dai tre menu di questo profilo", "Zona muerta compartida por los tres menús de este perfil"],
   "CLAVIER": ["KEYBOARD", "TASTATUR", "TASTIERA", "TECLADO"],
   "MANETTE": ["GAMEPAD", "GAMEPAD", "CONTROLLER", "MANDO"],
   "MENUS": ["MENUS", "MENÜS", "MENU", "MENÚS"],
@@ -210,6 +235,26 @@ const TR = {
     "MR — Makroaufnahme (Aufzeichnung: demnächst)", "MR — registrazione macro (acquisizione: presto)",
     "MR — grabación de macros (captura: próximamente)"],
   "ZONE MORTE :": ["DEAD ZONE:", "TOTZONE:", "ZONA MORTA:", "ZONA MUERTA:"],
+  "VITESSE SOURIS :": ["MOUSE SPEED:", "MAUS-TEMPO:", "VELOCITÀ MOUSE:", "VELOCIDAD RATÓN:"],
+  "Vitesse du pointeur pour ce profil": ["Pointer speed for this profile", "Zeigergeschwindigkeit für dieses Profil",
+    "Velocità del puntatore per questo profilo", "Velocidad del puntero para este perfil"],
+  "VITESSE GLOBALE :": ["GLOBAL SPEED:", "GLOBALES TEMPO:", "VELOCITÀ GLOBALE:", "VELOCIDAD GLOBAL:"],
+  "VITESSE DU PROFIL :": ["PROFILE SPEED:", "PROFILTEMPO:", "VELOCITÀ PROFILO:", "VELOCIDAD DEL PERFIL:"],
+  "Vitesse globale pour tous les profils sans réglage propre (ancien prototype).": [
+    "Global speed for all profiles without a profile-specific setting (older prototype).",
+    "Globales Tempo für alle Profile ohne eigenen Wert aus dem älteren Prototyp.",
+    "Velocità globale per tutti i profili senza impostazione specifica (vecchio prototipo).",
+    "Velocidad global para todos los perfiles sin ajuste propio (prototipo anterior)."],
+  "Ancien réglage propre au profil. Cliquez sur ↺ pour utiliser la vitesse globale.": [
+    "Older profile-specific setting. Click ↺ to use the global speed.",
+    "Alter profilspezifischer Wert. Auf ↺ klicken, um das globale Tempo zu verwenden.",
+    "Vecchia impostazione del profilo. Fai clic su ↺ per usare la velocità globale.",
+    "Ajuste anterior del perfil. Pulsa ↺ para usar la velocidad global."],
+  "Utiliser la vitesse globale": ["Use global speed", "Globales Tempo verwenden", "Usa la velocità globale", "Usar la velocidad global"],
+  "Vitesse globale non enregistrée : {e}": ["Global speed not saved: {e}", "Globales Tempo nicht gespeichert: {e}",
+    "Velocità globale non salvata: {e}", "Velocidad global no guardada: {e}"],
+  "Rétablir la vitesse par défaut": ["Restore default speed", "Standardgeschwindigkeit wiederherstellen",
+    "Ripristina la velocità predefinita", "Restablecer la velocidad predeterminada"],
   "GAUCHE": ["LEFT", "LINKS", "SINISTRA", "IZQUIERDA"],
   "DROIT": ["RIGHT", "RECHTS", "DESTRA", "DERECHA"],
   "Le stick du G13 pilote le joystick gauche de la manette (déplacement)": [
@@ -988,6 +1033,11 @@ const TR = {
     "Profil exportiert. Diese Elemente werden nicht oder nur teilweise in Logitech Gaming Software übernommen:",
     "Profilo esportato. Questi elementi non passano, o solo in parte, in Logitech Gaming Software:",
     "Perfil exportado. Estos elementos no pasan, o solo en parte, a Logitech Gaming Software:"],
+  "Mode souris et vitesse du stick non exportés ; les directions enregistrées peuvent devenir actives.": [
+    "Stick mouse mode and speed were not exported; stored direction bindings may become active.",
+    "Stick-Mausmodus und Geschwindigkeit wurden nicht exportiert; gespeicherte Richtungsbelegungen können aktiv werden.",
+    "Modalità mouse e velocità dello stick non esportate; le associazioni di direzione salvate potrebbero attivarsi.",
+    "El modo ratón y la velocidad del stick no se exportaron; las asignaciones de dirección guardadas pueden activarse."],
   "Profil exporté pour Logitech Gaming Software": ["Profile exported for Logitech Gaming Software",
     "Profil für Logitech Gaming Software exportiert", "Profilo esportato per Logitech Gaming Software",
     "Perfil exportado para Logitech Gaming Software"],
@@ -1018,6 +1068,18 @@ const TR = {
   "Stick en mode manette (joystick analogique)": ["Stick in gamepad mode (analog stick)", "Stick im Gamepad-Modus (Analogstick)",
     "Stick in modalità controller (levetta analogica)", "Stick en modo mando (joystick analógico)"],
   "Stick en mode clavier": ["Stick in keyboard mode", "Stick im Tastaturmodus", "Stick in modalità tastiera", "Stick en modo teclado"],
+  "Stick en mode souris : relâchez-le d'abord": ["Stick in mouse mode: release it first", "Stick im Mausmodus: zuerst loslassen",
+    "Stick in modalità mouse: rilascialo prima", "Stick en modo ratón: suéltalo primero"],
+  "Souris du stick : {m}. Changez de profil ou rebranchez le G13 pour réessayer.": [
+    "Stick mouse: {m}. Change profile or reconnect the G13 to retry.",
+    "Stick-Maus: {m}. Zum erneuten Versuch das Profil wechseln oder den G13 neu verbinden.",
+    "Mouse dello stick: {m}. Cambia profilo o ricollega il G13 per riprovare.",
+    "Ratón del stick: {m}. Cambia de perfil o reconecta el G13 para reintentar."],
+  "Souris du stick en pause après une interruption : bougez puis relâchez le stick pour reprendre.": [
+    "Stick mouse paused after an interruption: move and release the stick to resume.",
+    "Stick-Maus nach einer Unterbrechung pausiert: Stick bewegen und loslassen, um fortzufahren.",
+    "Mouse dello stick in pausa dopo un'interruzione: muovi e rilascia lo stick per riprendere.",
+    "Ratón del stick pausado tras una interrupción: mueve y suelta el stick para continuar."],
   "Stick → joystick gauche": ["Stick → left stick", "Stick → linker Stick", "Stick → levetta sinistra", "Stick → joystick izquierdo"],
   "Stick → joystick droit": ["Stick → right stick", "Stick → rechter Stick", "Stick → levetta destra", "Stick → joystick derecho"],
   "Mode manette indisponible : {e}. Installez le pilote ViGEmBus (github.com/nefarius/ViGEmBus).": [

@@ -46,7 +46,7 @@
   };
   const q = new URLSearchParams(location.search);
   let settings = { autostart: false, start_minimized: true, close_to_tray: true, overlay_key: "G25", profiles_dir: "C:\\Users\\…\\g13d\\config\\profiles",
-    language: q.get("lang"), keyboard_layout: q.get("kb") };
+    language: q.get("lang"), keyboard_layout: q.get("kb"), stick_mouse_speed: 100 };
   const listeners = [];
   let closeToken = 0;
   const emitEvent = (name, payload) => listeners.filter((l) => l.name === name).forEach((l) => l.cb({ payload }));
@@ -116,6 +116,10 @@
       delete profiles[id]; tokens.delete(id);
     },
     get_settings: () => settings,
+    set_stick_mouse_speed: ({ speed }) => {
+      settings = { ...settings, stick_mouse_speed: speed };
+      listeners.filter((l) => l.name === "stick-mouse-speed-changed").forEach((l) => l.cb({ payload: speed }));
+    },
     set_settings: (a) => { settings = { ...settings, autostart: a.autostart, start_minimized: a.startMinimized, close_to_tray: a.closeToTray, overlay_key: a.overlayKey, overlay_position: a.overlayPosition, auto_backup: a.autoBackup, auto_backup_keep: a.autoBackupKeep }; },
     backup_now: () => (settings.last_backup = "2026-10-17 15:30"),
     window_ready: () => true,

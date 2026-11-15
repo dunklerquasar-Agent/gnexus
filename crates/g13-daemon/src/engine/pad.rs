@@ -141,7 +141,7 @@ const SETTLE_WINDOW: u8 = 0x16;
 const INITIAL_SPAN: u8 = 0x50;
 
 #[derive(Debug, Clone)]
-struct Calibration {
+pub(super) struct Calibration {
     center: (f32, f32),
     min: (u8, u8),
     max: (u8, u8),
@@ -161,15 +161,19 @@ impl Default for Calibration {
 }
 
 impl Calibration {
-    fn observe(&mut self, pos: StickPosition, now: Instant) {
+    pub(super) fn observe(&mut self, pos: StickPosition, now: Instant) {
         self.min = (self.min.0.min(pos.raw_x), self.min.1.min(pos.raw_y));
         self.max = (self.max.0.max(pos.raw_x), self.max.1.max(pos.raw_y));
         self.last = Some((pos, now));
     }
 
     /// Re-centre on a still, near-middle position. `true` if the centre moved.
-    fn settle(&mut self, now: Instant) -> bool {
-        let Some((pos, since)) = self.last else { return false };
+    pub(super) fn settle(&mut self, now: Instant, sample: Option<StickPosition>) -> bool {
+        let Some((filtered, since)) = self.last else { return false };
+        // Mouse mode needs the latest raw sample as the rest point: it can
+        // differ slightly from the last hysteresis-filtered position. Keep
+        // the filtered timestamp so small noise doesn't restart settling.
+        let pos = sample.unwrap_or(filtered);
         let near = |v: u8| v.abs_diff(128) <= SETTLE_WINDOW;
         if !near(pos.raw_x) || !near(pos.raw_y) || now.duration_since(since) < SETTLE {
             return false;
@@ -178,6 +182,11 @@ impl Calibration {
         let moved = c != self.center;
         self.center = c;
         moved
+    }
+
+    /// Calibrated and radially dead-zoned vector, +Y = up.
+    pub(super) fn vector(&self, pos: StickPosition, deadzone: f32) -> (f32, f32) {
+        apply_deadzone(self.normalize(pos), deadzone.clamp(0.0, 0.95))
     }
 
     /// -1.0..=1.0 on each axis, +y = up.
@@ -238,7 +247,7 @@ impl Pad {
 
     /// See [`Calibration::settle`].
     pub fn settle(&mut self, now: Instant) -> bool {
-        self.calib.settle(now)
+        self.calib.settle(now, None)
     }
 
     /// The controller state: held buttons, plus the stick when `stick` is
@@ -256,7 +265,7 @@ impl Pad {
             }
         }
         if let Some((pos, dz, target)) = stick {
-            let (x, y) = apply_deadzone(self.calib.normalize(pos), dz.clamp(0.0, 0.95));
+            let (x, y) = self.calib.vector(pos, dz);
             let (x, y) = (to_axis(x), to_axis(y));
             match target {
                 PadStick::Left => (st.left_x, st.left_y) = (x, y),

@@ -127,11 +127,12 @@ impl HidWorker {
                     drop(dev);
 
                     // Never leave keys stuck down, whatever ended the session.
-                    let events = &self.events;
-                    self.tracker.release_all(|e| {
-                        let _ = events.send(e);
-                    });
-                    let _ = self.events.send(DeviceEvent::Disconnected);
+                    // No engine tick may occur between these final releases and
+                    // the disconnect that stops continuous stick motion.
+                    let mut ending = Vec::new();
+                    self.tracker.release_all(|event| ending.push(event));
+                    ending.push(DeviceEvent::Disconnected);
+                    let _ = self.events.send(DeviceEvent::Batch(ending));
 
                     match end {
                         SessionEnd::Shutdown | SessionEnd::EngineGone => return,
@@ -186,12 +187,9 @@ impl HidWorker {
                 Ok(0) => {} // timeout, nothing new
                 Ok(n) => {
                     if let Some(report) = G13InputReport::from_bytes(&buf[..n]) {
-                        let events = &self.events;
-                        let mut engine_gone = false;
-                        self.tracker.update(&report, |e| {
-                            engine_gone |= events.send(e).is_err();
-                        });
-                        if engine_gone {
+                        if let Some(batch) = self.tracker.batch(&report)
+                            && self.events.send(batch).is_err()
+                        {
                             return SessionEnd::EngineGone;
                         }
                     } else {

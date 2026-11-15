@@ -83,6 +83,10 @@ enum Ev {
     Pinned { id: Option<String> },
     /// The virtual gamepad failed (ViGEmBus missing…).
     GamepadError { message: String },
+    /// The G13 stick's mouse injection failed.
+    StickMouseError { message: String },
+    /// Mouse motion paused after a long engine-clock interruption.
+    StickMousePaused,
     /// New state of the mouse.
     Mouse { status: Box<MouseStatus> },
     /// New state of the headset.
@@ -513,6 +517,7 @@ struct SettingsView {
     overlay_position: String,
     language: Option<String>,
     keyboard_layout: Option<String>,
+    stick_mouse_speed: u16,
     profiles_dir: String,
     auto_backup: String,
     auto_backup_keep: u32,
@@ -531,6 +536,7 @@ fn get_settings(app: AppHandle, state: State<AppState>) -> SettingsView {
         overlay_position: s.overlay_position,
         language: s.language,
         keyboard_layout: s.keyboard_layout,
+        stick_mouse_speed: s.stick_mouse_speed,
         profiles_dir: state.profiles_dir.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
         auto_backup: s.auto_backup,
         auto_backup_keep: s.auto_backup_keep,
@@ -569,6 +575,25 @@ fn set_settings(
     s.auto_backup = if backup::period_days(&auto_backup).is_some() { auto_backup } else { "off".into() };
     s.auto_backup_keep = auto_backup_keep.clamp(1, 100);
     s.save(state.settings_path.as_deref())
+}
+
+/// Global stick-mouse speed; do not touch any profile or system mouse setting.
+#[tauri::command]
+fn set_stick_mouse_speed(app: AppHandle, state: State<AppState>, speed: u16) -> Result<(), String> {
+    if !(10..=200).contains(&speed) {
+        return Err("vitesse du stick hors limites (10..200)".into());
+    }
+    // Persist before changing the running engine. Keep the lock until the
+    // request and broadcast are queued, so concurrent windows cannot reorder
+    // persistence, engine updates, and UI notifications.
+    let mut current = state.settings.lock().unwrap();
+    let mut next = current.clone();
+    next.stick_mouse_speed = speed;
+    next.save(state.settings_path.as_deref())?;
+    *current = next;
+    state.request(Request::SetStickMouseSpeed(speed));
+    let _ = app.emit("stick-mouse-speed-changed", speed);
+    Ok(())
 }
 
 /// A backup of the whole configuration now, in the scheduled backups. Returns its date.
@@ -644,11 +669,17 @@ fn tray_menu(app: &AppHandle, lang: &str) -> tauri::Result<Menu<tauri::Wry>> {
 
 // ---- whole configuration: export / import / reset ----------------------------------
 
-/// Apply restored preferences: file, overlay key, autostart.
+/// Apply restored preferences: file, overlay key, stick speed, autostart.
 fn apply_settings(app: &AppHandle, state: &AppState, settings: Settings, autostart: Option<bool>) -> Result<(), String> {
-    state.request(Request::SetOverlayKey(parse_overlay_key(settings.overlay_key.as_deref())));
-    settings.save(state.settings_path.as_deref())?;
-    *state.settings.lock().unwrap() = settings;
+    let settings = settings.normalized();
+    {
+        let mut current = state.settings.lock().unwrap();
+        settings.save(state.settings_path.as_deref())?;
+        state.request(Request::SetOverlayKey(parse_overlay_key(settings.overlay_key.as_deref())));
+        state.request(Request::SetStickMouseSpeed(settings.stick_mouse_speed));
+        let _ = app.emit("stick-mouse-speed-changed", settings.stick_mouse_speed);
+        *current = settings;
+    }
     if let Some(on) = autostart {
         let launcher = app.autolaunch();
         if launcher.is_enabled().unwrap_or(false) != on {
@@ -1434,6 +1465,8 @@ fn forward_events(app: AppHandle, rx: std::sync::mpsc::Receiver<UiEvent>, status
                             Some(Ev::Lcd { frame: px.to_vec() })
                         }
                         UiEvent::GamepadError(message) => Some(Ev::GamepadError { message }),
+                        UiEvent::StickMouseError(message) => Some(Ev::StickMouseError { message }),
+                        UiEvent::StickMousePaused => Some(Ev::StickMousePaused),
                         UiEvent::Mouse(st) => {
                             s.mouse = Some((*st).clone());
                             Some(Ev::Mouse { status: st })
@@ -1597,6 +1630,7 @@ fn main() {
         dry_run: has("--dry-run"),
         poll: has("--poll"),
         overlay_key: parse_overlay_key(settings.overlay_key.as_deref()),
+        stick_mouse_speed: settings.stick_mouse_speed,
         ..RuntimeOptions::default()
     };
 
@@ -1668,6 +1702,7 @@ fn main() {
             delete_profile,
             get_settings,
             set_settings,
+            set_stick_mouse_speed,
             open_profiles_dir,
             app_version,
             open_link,

@@ -24,10 +24,17 @@ pub enum DeviceEvent {
     /// The G13 disappeared. Release events for every held key have already
     /// been emitted before this one.
     Disconnected,
+    /// Events derived from one input report, or the final releases plus
+    /// disconnect. The engine handles the entire batch before its next tick.
+    /// InputTracker and the HID worker only create flat batches.
+    Batch(Vec<DeviceEvent>),
     /// A key changed state (edge-triggered, never repeated).
     Key { key: G13Key, pressed: bool },
     /// The stick moved by more than the configured hysteresis.
     Stick(StickPosition),
+    /// A smaller raw position change, needed to stop continuous mouse motion
+    /// precisely at the dead-zone edge. Does not change filtered key/gamepad behavior.
+    StickSample(StickPosition),
 }
 
 /// Engine → device.

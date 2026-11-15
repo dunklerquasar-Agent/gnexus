@@ -204,21 +204,36 @@ pub enum StickMode {
     Keys,
     /// Analog stick of a virtual Xbox 360 controller (see `engine::pad`).
     Gamepad,
+    /// Continuous relative mouse movement while the stick is held.
+    Mouse,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StickConfig {
+    /// Fallback for all banks, including profiles written before per-bank modes.
     pub mode: StickMode,
+    /// Optional mode overrides for M1, M2, and M3, in that order.
+    pub bank_modes: [Option<StickMode>; 3],
     /// Dead zone, 0.0..1.0 of the full deflection (per axis in keys mode,
-    /// radial in gamepad mode).
+    /// radial in gamepad and mouse modes). Shared by the profile's banks.
     pub deadzone: f32,
     /// Gamepad mode: which controller stick it drives.
     pub target: PadStick,
+    /// Optional per-profile speed from older experimental builds (10..=200).
+    /// Without an override the application-wide speed is used.
+    pub mouse_speed: Option<u16>,
 }
 
 impl Default for StickConfig {
     fn default() -> Self {
-        Self { mode: StickMode::Keys, deadzone: 0.35, target: PadStick::Left }
+        Self { mode: StickMode::Keys, bank_modes: [None; 3], deadzone: 0.35, target: PadStick::Left, mouse_speed: None }
+    }
+}
+
+impl StickConfig {
+    /// Effective mode of one M-bank; old profiles inherit the shared mode.
+    pub fn mode_for(&self, bank: MBank) -> StickMode {
+        self.bank_modes[bank.index()].unwrap_or(self.mode)
     }
 }
 
@@ -242,7 +257,7 @@ impl Profile {
     /// Does this profile need the virtual gamepad (stick in gamepad mode or
     /// a gamepad button bound anywhere)?
     pub fn uses_pad(&self) -> bool {
-        self.stick.mode == StickMode::Gamepad
+        MBank::ALL.into_iter().any(|b| self.stick.mode_for(b) == StickMode::Gamepad)
             || self.banks.iter().any(|b| b.slots.iter().any(|a| match a {
                 Action::Pad(_) => true,
                 Action::TapDance(td) => [&td.tap, &td.hold, &td.double_tap, &td.tap_hold].iter().any(|x| matches!(x, Action::Pad(_))),

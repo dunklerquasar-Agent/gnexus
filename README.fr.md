@@ -40,7 +40,7 @@ Il tourne dans la zone de notification, sans logiciel Logitech, et fonctionne sa
 - Toutes les touches réaffectables : touches et raccourcis, boutons et molette de souris, macros, touches multi-états (appui court / long / double)
 - Trois banques (M1 à M3) avec leur couleur de rétroéclairage, profils par application (changés automatiquement selon le jeu au premier plan)
 - Macros : éditeur, bibliothèque, enregistrement avec la touche RECORD (MR)
-- Stick en quatre touches, ou joystick analogique d'une manette Xbox 360 virtuelle
+- Stick en quatre touches, joystick analogique d'une manette Xbox 360 virtuelle, ou [pointeur souris expérimental](docs/G13_STICK_MOUSE.md)
 - Applets de l'écran LCD : horloge, moniteur système, lecture en cours (commandes média), choix du profil
 - Overlay en jeu pour modifier les touches sans quitter le jeu
 - Import / export des profils Logitech Gaming Software (`.xml`)

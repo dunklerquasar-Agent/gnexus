@@ -40,9 +40,9 @@ use std::fmt::Write as _;
 use indexmap::IndexMap;
 
 use super::ProfileError;
-use super::format::{ActionDto, BankDto, FileDto, MacroDto, ModeDto};
+use super::format::{ActionDto, BankDto, FileDto, MacroDto, ModeDto, PadStickDto, StickModeDto};
 use super::rules::MatchRule;
-use crate::engine::bindings::{Input, MBank};
+use crate::engine::bindings::{Input, MBank, StickConfig};
 use crate::engine::macros::MIN_LOOP_PERIOD;
 use crate::keycode::{KeyChord, KeyCode, MouseButton};
 
@@ -688,6 +688,21 @@ fn export_action(a: &ActionDto) -> Result<(String, String), String> {
 pub fn export(dto: &FileDto) -> (String, Vec<String>) {
     let mut counter = 0u64;
     let mut skipped = Vec::new();
+    if dto.stick.as_ref().is_some_and(|s| {
+        s.mouse_speed.is_some() || MBank::ALL.into_iter().any(|bank| s.mode_for(bank) == StickModeDto::Mouse)
+    }) {
+        // LGS has a mouse mode, but this exporter does not yet know a
+        // verified XML representation. Never silently imply a round trip.
+        skipped.push("Mode souris et vitesse du stick non exportés ; les directions enregistrées peuvent devenir actives.".into());
+    }
+    if dto.stick.as_ref().is_some_and(|s| MBank::ALL.into_iter().any(|bank| s.mode_for(bank) == StickModeDto::Gamepad)) {
+        skipped.push("Mode manette du stick non exporté ; les directions enregistrées peuvent devenir actives.".into());
+    }
+    if dto.stick.as_ref().is_some_and(|s| {
+        s.deadzone != (StickConfig::default().deadzone * 100.0).round() as u8 || s.target != PadStickDto::Left
+    }) {
+        skipped.push("Zone morte et/ou cible manette du stick non exportées.".into());
+    }
     let mut macro_xml = String::new();
     let mut by_content: HashMap<String, String> = HashMap::new(); // body → guid
     let mut assigns = String::new();

@@ -1,11 +1,12 @@
 //! `g13d` — Logitech G13 daemon (headless; the GUI embeds the same runtime).
 //!
 //! ```text
-//! g13d [--dry-run] [--poll] [--profiles <dir>] [--no-auto] [-v|-vv]
+//! g13d [--dry-run] [--poll] [--profiles <dir>] [--no-auto] [--stick-mouse-speed <10..200>] [-v|-vv]
 //!   --dry-run          log the keys/clicks that would be injected instead of sending them
 //!   --poll             read input with GetInputReport polling instead of interrupt reads
 //!   --profiles <dir>   profile directory (default: <config dir>/g13d/profiles)
 //!   --no-auto          no automatic profile switching on focus change
+//!   --stick-mouse-speed  global G13 stick-mouse speed in percent (default: 100)
 //!   -v / -vv           debug / trace logging (or set RUST_LOG)
 //! ```
 
@@ -15,7 +16,7 @@ use std::time::Duration;
 
 use g13_daemon::runtime::{Runtime, RuntimeOptions};
 
-const USAGE: &str = "usage: g13d [--dry-run] [--poll] [--profiles <dir>] [--no-auto] [-v|-vv]";
+const USAGE: &str = "usage: g13d [--dry-run] [--poll] [--profiles <dir>] [--no-auto] [--stick-mouse-speed <10..200>] [-v|-vv]";
 
 fn parse_args() -> Result<(RuntimeOptions, u8), String> {
     let mut o = RuntimeOptions::default();
@@ -27,6 +28,14 @@ fn parse_args() -> Result<(RuntimeOptions, u8), String> {
             "--poll" => o.poll = true,
             "--profiles" => o.profiles_dir = Some(it.next().ok_or("--profiles needs a directory")?.into()),
             "--no-auto" => o.auto_switch = false,
+            "--stick-mouse-speed" => {
+                let speed: u16 = it.next().ok_or("--stick-mouse-speed needs a value")?
+                    .parse().map_err(|_| "--stick-mouse-speed must be a number from 10 to 200")?;
+                if !(10..=200).contains(&speed) {
+                    return Err("--stick-mouse-speed must be a number from 10 to 200".into());
+                }
+                o.stick_mouse_speed = speed;
+            }
             "-v" => verbosity = verbosity.max(1),
             "-vv" => verbosity = 2,
             "-h" | "--help" => {

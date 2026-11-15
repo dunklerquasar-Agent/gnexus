@@ -11,9 +11,11 @@ npm ci --ignore-scripts --no-audit --no-fund
 node macro-cases.cjs
 node close-cases.cjs
 node close-mouse-draft.cjs
+node speed-races.cjs
+node export-report.cjs
 ```
 
 To run against a different UI tree, pass its path as the first argument.
-`ONLY=substring` selects a named test. Several known limitations of the
+`ONLY=substring` selects a named test. The speed and export-warning checks also use a modeled backend. Several known limitations of the
 experiment remain (forced destruction, external writers and multi-file crash
 atomicity); these tests do not establish complete protection for other devices.

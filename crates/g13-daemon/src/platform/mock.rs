@@ -20,7 +20,7 @@ pub enum Injected {
     GamepadUnplugged,
 }
 
-/// Logs every event (`info` level) and keeps them in memory. Nothing reaches the OS.
+/// Records events in tests, or logs without retaining them in dry-run. Nothing reaches the OS.
 #[derive(Default)]
 pub struct RecordingInjector {
     events: Mutex<Vec<Injected>>,
@@ -33,7 +33,7 @@ impl RecordingInjector {
         Self::default()
     }
 
-    /// Recorder that also logs each event (dry-run mode).
+    /// Logger without event retention (dry-run mode).
     pub fn logging() -> Self {
         Self { events: Mutex::new(Vec::new()), log: true }
     }
@@ -45,9 +45,12 @@ impl RecordingInjector {
 
     fn push(&self, ev: Injected) -> PlatformResult {
         if self.log {
+            // Continuous mouse movement can run indefinitely in a dry run.
+            // Logging must not also retain an unbounded copy of every event.
             log::info!("[dry-run] {ev:?}");
+        } else {
+            self.events.lock().unwrap().push(ev);
         }
-        self.events.lock().unwrap().push(ev);
         Ok(())
     }
 }
@@ -89,5 +92,22 @@ impl MediaProvider for NullMediaProvider {
     }
     fn send(&mut self, _cmd: MediaCommand) -> PlatformResult {
         Err(PlatformError::Unsupported("media control"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logging_does_not_retain_unbounded_events() {
+        let sink = RecordingInjector::logging();
+        for _ in 0..10_000 {
+            sink.mouse_move(1, 1).unwrap();
+        }
+        assert!(sink.take().is_empty());
+        let record = RecordingInjector::new();
+        record.mouse_move(1, 1).unwrap();
+        assert_eq!(record.take(), vec![Injected::Move(1, 1)]);
     }
 }

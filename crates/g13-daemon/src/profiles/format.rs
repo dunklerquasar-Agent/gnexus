@@ -6,9 +6,13 @@
 //! default = true              # profile used when no rule matches (optional)
 //!
 //! [stick]                     # optional, these are the defaults
-//! mode = "keys"               # keys (STICK_* bindings) / gamepad (virtual Xbox 360 stick)
-//! deadzone = 35               # percent of full deflection
+//! mode = "keys"               # fallback: keys (STICK_*), gamepad, or mouse
+//! deadzone = 35               # percent of full deflection, shared by banks
 //! target = "left"             # gamepad mode: left / right controller stick
+//!                             # speed is global; legacy mouse_speed overrides it
+//! [stick.bank_modes]           # optional overrides, other banks inherit mode
+//! M2 = "mouse"
+//! M3 = "gamepad"
 //!
 //! [[rules]]                   # auto-switch when one of these apps has focus
 //! exe = "eldenring.exe"       # file name, case-insensitive (".exe" optional)
@@ -173,11 +177,50 @@ pub enum ModeDto {
 pub struct StickDto {
     #[serde(default)]
     pub mode: StickModeDto,
+    /// Optional M1/M2/M3 overrides; absent banks inherit `mode`.
+    #[serde(default, skip_serializing_if = "StickBankModesDto::is_empty")]
+    pub bank_modes: StickBankModesDto,
     /// Percent of full deflection.
     #[serde(default = "default_deadzone")]
     pub deadzone: u8,
     #[serde(default, skip_serializing_if = "is_left")]
     pub target: PadStickDto,
+    /// Legacy experimental profile override; absence means application-wide speed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mouse_speed: Option<u16>,
+}
+
+/// Explicit mode overrides for individual banks. Unknown names are rejected
+/// rather than silently ignored (a typo could otherwise activate bindings).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StickBankModesDto {
+    #[serde(rename = "M1", default, skip_serializing_if = "Option::is_none")]
+    pub m1: Option<StickModeDto>,
+    #[serde(rename = "M2", default, skip_serializing_if = "Option::is_none")]
+    pub m2: Option<StickModeDto>,
+    #[serde(rename = "M3", default, skip_serializing_if = "Option::is_none")]
+    pub m3: Option<StickModeDto>,
+}
+
+impl StickBankModesDto {
+    pub fn get(&self, bank: MBank) -> Option<StickModeDto> {
+        match bank {
+            MBank::M1 => self.m1,
+            MBank::M2 => self.m2,
+            MBank::M3 => self.m3,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.m1.is_none() && self.m2.is_none() && self.m3.is_none()
+    }
+}
+
+impl StickDto {
+    pub fn mode_for(&self, bank: MBank) -> StickModeDto {
+        self.bank_modes.get(bank).unwrap_or(self.mode)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,6 +241,27 @@ pub enum StickModeDto {
     #[default]
     Keys,
     Gamepad,
+    Mouse,
+}
+
+impl From<StickModeDto> for StickMode {
+    fn from(mode: StickModeDto) -> Self {
+        match mode {
+            StickModeDto::Keys => Self::Keys,
+            StickModeDto::Gamepad => Self::Gamepad,
+            StickModeDto::Mouse => Self::Mouse,
+        }
+    }
+}
+
+impl From<StickMode> for StickModeDto {
+    fn from(mode: StickMode) -> Self {
+        match mode {
+            StickMode::Keys => Self::Keys,
+            StickMode::Gamepad => Self::Gamepad,
+            StickMode::Mouse => Self::Mouse,
+        }
+    }
 }
 
 fn default_deadzone() -> u8 {
@@ -245,16 +309,20 @@ pub fn from_dto(dto: FileDto) -> Result<ProfileDoc, ProfileError> {
         if s.deadzone > 95 {
             return Err(ProfileError(format!("stick: deadzone {}% out of range (0..95)", s.deadzone)));
         }
+        if let Some(speed) = s.mouse_speed
+            && !(10..=200).contains(&speed)
+        {
+            return Err(ProfileError(format!("stick: mouse speed {speed}% out of range (10..200)")));
+        }
         profile.stick = StickConfig {
-            mode: match s.mode {
-                StickModeDto::Keys => StickMode::Keys,
-                StickModeDto::Gamepad => StickMode::Gamepad,
-            },
+            mode: s.mode.into(),
+            bank_modes: std::array::from_fn(|i| s.bank_modes.get(MBank::ALL[i]).map(Into::into)),
             deadzone: f32::from(s.deadzone) / 100.0,
             target: match s.target {
                 PadStickDto::Left => PadStick::Left,
                 PadStickDto::Right => PadStick::Right,
             },
+            mouse_speed: s.mouse_speed,
         };
     }
     for bank in MBank::ALL {
@@ -392,15 +460,18 @@ pub fn to_dto(doc: &ProfileDoc) -> Result<FileDto, ProfileError> {
         default: doc.is_default,
         rules: doc.rules.clone(),
         stick: (stick != StickConfig::default()).then(|| StickDto {
-            mode: match stick.mode {
-                StickMode::Keys => StickModeDto::Keys,
-                StickMode::Gamepad => StickModeDto::Gamepad,
+            mode: stick.mode.into(),
+            bank_modes: StickBankModesDto {
+                m1: stick.bank_modes[0].map(Into::into),
+                m2: stick.bank_modes[1].map(Into::into),
+                m3: stick.bank_modes[2].map(Into::into),
             },
             deadzone: (stick.deadzone * 100.0).round() as u8,
             target: match stick.target {
                 PadStick::Left => PadStickDto::Left,
                 PadStick::Right => PadStickDto::Right,
             },
+            mouse_speed: stick.mouse_speed,
         }),
         ..FileDto::default()
     };

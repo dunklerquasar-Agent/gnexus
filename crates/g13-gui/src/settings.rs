@@ -22,6 +22,8 @@ pub struct Settings {
     pub language: Option<String>,
     /// Keyboard drawn in the key picker (`"azerty"`, `"us"`, `"qwertz"`, `"it"`, `"es"`); `None` = the language's.
     pub keyboard_layout: Option<String>,
+    /// Global G13 stick-mouse speed in percent (10..=200; 100 by default).
+    pub stick_mouse_speed: u16,
     /// Scheduled backup of the whole configuration: `"off"`, `"daily"`, `"weekly"` or `"monthly"`.
     pub auto_backup: String,
     /// Scheduled backups kept (the oldest are deleted).
@@ -37,6 +39,7 @@ impl Default for Settings {
             overlay_position: "right".into(),
             language: None,
             keyboard_layout: None,
+            stick_mouse_speed: 100,
             auto_backup: "weekly".into(),
             auto_backup_keep: 10,
         }
@@ -50,8 +53,15 @@ impl Settings {
 
     pub fn load(path: Option<&Path>) -> Self {
         path.and_then(|p| fs::read_to_string(p).ok())
-            .and_then(|t| serde_json::from_str(&t).ok())
+            .and_then(|t| serde_json::from_str::<Self>(&t).ok())
             .unwrap_or_default()
+            .normalized()
+    }
+
+    /// Also used when restoring preferences from a backup, which bypasses load.
+    pub fn normalized(mut self) -> Self {
+        self.stick_mouse_speed = self.stick_mouse_speed.clamp(10, 200);
+        self
     }
 
     #[cfg(test)]
@@ -79,5 +89,13 @@ mod tests {
         assert_eq!(s.overlay_key.as_deref(), Some("G25"));
         let s = Settings::parse(r#"{ "overlay_key": null }"#);
         assert_eq!(s.overlay_key, None, "explicitly disabled stays disabled");
+    }
+
+    #[test]
+    fn stick_mouse_speed_defaults_and_is_bounded_on_load_and_restore() {
+        assert_eq!(Settings::parse("{}").stick_mouse_speed, 100);
+        assert_eq!(Settings::parse(r#"{ "stick_mouse_speed": 140 }"#).normalized().stick_mouse_speed, 140);
+        assert_eq!(Settings::parse(r#"{ "stick_mouse_speed": 0 }"#).normalized().stick_mouse_speed, 10);
+        assert_eq!(Settings::parse(r#"{ "stick_mouse_speed": 500 }"#).normalized().stick_mouse_speed, 200);
     }
 }

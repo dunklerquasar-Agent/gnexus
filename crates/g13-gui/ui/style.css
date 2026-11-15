@@ -278,7 +278,8 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 20px;
 #device.offline-mode .key .klabel { visibility: hidden; }
 #device.offline-mode .key .kx { display: inline; }
 #device.offline-mode .key .kshape { stroke: var(--line-dim); }
-#device.offline-mode .color-ctl, #device.offline-mode .dz-ctl { opacity: 0; pointer-events: none; }
+#device.offline-mode .color-ctl, #device.offline-mode .dz-ctl,
+#device.offline-mode .mouse-speed-ctl { opacity: 0; pointer-events: none; }
 
 .dz-ctl { position: absolute; display: flex; flex-direction: column; align-items: center; gap: 10px; }
 .dz-ctl input[type=range] { width: 130px; }
@@ -293,6 +294,15 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 20px;
 #device.gamepad .pad-ctl { display: flex; }
 #device.gamepad .dz-ctl { top: 726px !important; }
 #device.offline-mode .pad-ctl { opacity: 0; pointer-events: none; }
+/* mouse mode: global speed (or a legacy profile override) and radial dead zone */
+.mouse-speed-ctl { position: absolute; display: none; flex-direction: column; align-items: center; gap: 8px; }
+.mouse-speed-row { display: flex; align-items: center; gap: 8px; }
+.mouse-speed-row input[type=range] { width: 112px; }
+.mouse-speed-row button { width: 24px; height: 24px; border: 1px solid var(--line-dim); border-radius: 6px;
+  color: var(--muted); background: transparent; font: inherit; cursor: pointer; }
+.mouse-speed-row button:hover { color: var(--text); border-color: var(--line); }
+#device.mouse-mode .mouse-speed-ctl { display: flex; }
+#device.mouse-mode .dz-ctl { top: 738px !important; }
 .offline {
   position: absolute; left: 50%; top: 66%; transform: translate(-50%, -50%); z-index: 5; display: none;
   flex-direction: column; align-items: center; gap: 12px; text-align: center; max-width: 360px;

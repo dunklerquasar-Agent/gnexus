@@ -54,7 +54,7 @@ crates/
     src/keycode.rs            KeyCode (positions physiques) + tables scancode Win32 / evdev
     src/device/
       mod.rs                  DeviceEvent / DeviceCommand
-      tracker.rs              diff de rapports → fronts, hystérésis du stick
+      tracker.rs              fronts, hystérésis et échantillons bruts du stick
       hid.rs                  thread HID, lecture Interrupt|Poll, hotplug, exécution commandes
     src/engine/
       mod.rs                  Engine : dispatch, M1/M2/M3, MR, BD, L1–L4, UiEvent
@@ -351,8 +351,8 @@ Back Start, LS RS = clics des sticks, Up Down Left Right = croix), dans n'import
   du centre (±0x16) pendant 1,5 s (`SETTLE`) ; l'amplitude part de ±0x50 autour du centre et
   s'élargit à chaque position vue, pour que la déflexion maximale donne toujours ±32767.
 - **Branchée seulement quand il le faut** : la manette virtuelle est branchée quand le G13 est
-  connecté et que le profil actif l'utilise (stick en mode manette ou bouton de manette assigné), et
-  débranchée sinon (changement de profil, débranchement du G13, arrêt). Un jeu ne voit donc pas de
+  connecté et que le profil actif l'utilise dans au moins une banque (stick en mode manette ou
+  bouton de manette assigné), et débranchée sinon (changement de profil, débranchement du G13, arrêt). Un jeu ne voit donc pas de
   manette fantôme avec un profil clavier. Changement de profil, débranchement et arrêt relâchent
   tous les boutons avant de débrancher (invariant « aucune touche bloquée »).
 - Si ViGEmBus est absent ou refuse, un seul avertissement (`UiEvent::GamepadError` → message dans
@@ -360,6 +360,21 @@ Back Start, LS RS = clics des sticks, Up Down Left Right = croix), dans n'import
   ralentir le thread moteur à chaque mouvement du stick.
 - Vérifié sur la machine de dev : `cargo test -p g13-daemon vigem -- --ignored` fait apparaître
   « Contrôleur XBOX 360 pour Windows » dans le Gestionnaire de périphériques, puis le retire.
+
+## Mode souris expérimental du stick G13
+
+`[stick] mode = "mouse"` ou `[stick.bank_modes] M2 = "mouse"` : mouvement relatif continu,
+zone morte radiale et vitesse **globale** (10..200 %, 100 par défaut). Les anciens profils
+expérimentaux avec `mouse_speed` conservent leur vitesse propre jusqu'à suppression de ce réglage.
+Les modes peuvent différer entre M1, M2 et M3 ; la zone morte reste commune au profil. Les boutons
+souris sont des assignations distinctes ; les directions `STICK_*` restent enregistrées mais
+inactives en mode souris. Le stick doit revenir au neutre à la connexion, au rechargement du profil
+et après une entrée en mode souris. Le centre souris est indépendant de la manette et n'est pas
+réappris hors de la zone morte. Débranchement, arrêt et erreur d'injection arrêtent le mouvement.
+L'export LGS signale que le mode souris n'est pas converti.
+
+Détails, limites et protocole de validation : [G13_STICK_MOUSE.md](G13_STICK_MOUSE.md).
+Ce mode reste à tester sur le matériel et Windows 11 ; sa courbe n'a pas été comparée à LGS.
 
 ## Souris G502 X PLUS (HID++ 2.0) — étape 1 : exploration
 
@@ -886,9 +901,8 @@ Constats matériels :
 ## Étapes suivantes
 
 1. ~~**Profils**~~ : fait (voir « Profils »).
-2. **Stick** : mode touches (`STICK_UP/DOWN/LEFT/RIGHT`) et mode manette Xbox 360 (ViGEmBus,
-   calibration automatique) faits. Reste : manette uinput sous Linux ; éventuellement courbe de
-   réponse / sensibilité et stick → souris.
+2. **Stick** : modes touches, manette et souris expérimentale. Reste : valider le mode souris sur
+   Windows 11 / G13, comparer sa courbe à LGS et étudier l'import/export de ce réglage.
 3. **MR** : enregistrement à la volée via hook `WH_KEYBOARD_LL` (filtrer `dwExtraInfo == "G13D"`)
    / lecture evdev sous Linux.
 4. ~~**LCD**~~ : fait (voir « Écran LCD »). Pistes : applets configurables, contrôle média par

@@ -133,7 +133,7 @@ fn invalid_files_are_rejected_with_context() {
         ("name = 'x'\nnmae = 'typo'", "nmae"),
         ("name = 'x'\n[banks.M4]\n", "M4"),
         ("name = 'x'\n[stick]\ndeadzone = 99\n", "deadzone"),
-        ("name = 'x'\n[stick]\nmode = 'mouse'\n", "mouse"),
+        ("name = 'x'\n[stick]\nmode = 'trackball'\n", "trackball"),
     ];
     for (text, needle) in cases {
         let err = from_toml(text).expect_err(text).0;
@@ -335,11 +335,157 @@ fn gamepad_profile_round_trip() {
     let text = "name = \"p\"\n[stick]\nmode = \"gamepad\"\ndeadzone = 12\ntarget = \"right\"\n\n[banks.M1]\nG1 = { pad = \"A\" }\nG2 = { pad = \"l3\" }\n";
     let doc = format::from_toml(text).unwrap();
     let p = &doc.profile;
-    assert_eq!(p.stick, StickConfig { mode: StickMode::Gamepad, deadzone: 0.12, target: PadStick::Right });
+    assert_eq!(p.stick, StickConfig { mode: StickMode::Gamepad, deadzone: 0.12, target: PadStick::Right, ..StickConfig::default() });
     assert_eq!(p.bank(MBank::M1).get(K::G2), &Action::Pad(PadButton::LS));
     assert!(p.uses_pad());
     let out = format::to_toml(&doc).unwrap();
     assert!(out.contains("G1 = { pad = \"A\" }") && out.contains("G2 = { pad = \"LS\" }"), "{out}");
     assert_eq!(format::from_toml(&out).unwrap(), doc);
     assert!(format::from_toml("name = \"p\"\n[banks.M1]\nG1 = { pad = \"Z\" }\n").is_err());
+}
+#[test]
+fn mouse_stick_profile_roundtrips_toml_json_and_old_profiles_keep_defaults() {
+    let text = "name = \"mouse\"\n[stick]\nmode = \"mouse\"\ndeadzone = 18\nmouse_speed = 140\n\n[banks.M1]\nG23 = { mouse = \"Left\" }\n";
+    let doc = from_toml(text).unwrap();
+    assert_eq!(doc.profile.stick.mode, StickMode::Mouse);
+    assert_eq!(doc.profile.stick.deadzone, 0.18);
+    assert_eq!(doc.profile.stick.mouse_speed, Some(140));
+    assert_eq!(doc.profile.bank(MBank::M1).get(K::G23), &Action::MouseButton(MouseButton::Left));
+    let out = to_toml(&doc).unwrap();
+    assert!(out.contains("mode = \"mouse\"") && out.contains("mouse_speed = 140"), "{out}");
+    assert_eq!(from_toml(&out).unwrap(), doc);
+    let dto = to_dto(&doc).unwrap();
+    let json = serde_json::to_string(&dto).unwrap();
+    let back = serde_json::from_str::<FileDto>(&json).unwrap();
+    assert_eq!(from_dto(back.clone()).unwrap(), doc);
+    assert_eq!(from_toml(&dto_to_toml(&back).unwrap()).unwrap(), doc);
+
+    for mode in ["keys", "gamepad", "mouse"] {
+        let old = format!("name = \"old\"\n[stick]\nmode = \"{mode}\"\ndeadzone = 35\n");
+        let parsed = from_toml(&old).unwrap();
+        assert_eq!(parsed.profile.stick.mouse_speed, None);
+        assert!(!to_toml(&parsed).unwrap().contains("mouse_speed"), "default need not be written");
+    }
+    assert_eq!(from_toml("name = \"no stick section\"").unwrap().profile.stick, StickConfig::default());
+}
+
+#[test]
+fn mouse_speed_and_deadzone_are_validated_in_both_profile_formats() {
+    for speed in [0, 9, 201, 1000] {
+        let text = format!("name = \"bad\"\n[stick]\nmode = \"mouse\"\nmouse_speed = {speed}\n");
+        assert!(from_toml(&text).is_err(), "speed {speed}");
+        let json = format!(r#"{{"name":"bad","stick":{{"mode":"mouse","mouse_speed":{speed}}}}}"#);
+        let dto = serde_json::from_str::<FileDto>(&json).unwrap();
+        assert!(from_dto(dto).is_err(), "JSON speed {speed}");
+    }
+    for speed in [10, 100, 200] {
+        let text = format!("name = \"ok\"\n[stick]\nmode = \"mouse\"\nmouse_speed = {speed}\n");
+        assert!(from_toml(&text).is_ok());
+    }
+    assert!(from_toml("name = \"bad\"\n[stick]\nmode = \"mouse\"\ndeadzone = 96\n").is_err());
+    assert!(from_toml("name = \"bad\"\n[stick]\nmode = \"mouse\"\nspeeed = 100\n").is_err());
+}
+
+#[test]
+fn lgs_export_warns_that_stick_mouse_mode_is_not_exported() {
+    let mut p = Profile { name: "mouse export".into(), ..Profile::default() };
+    p.stick.mode = StickMode::Mouse;
+    p.stick.mouse_speed = Some(140);
+    p.bank_mut(MBank::M1).set_input(Input::Stick(StickDir::Up), Action::key("W"));
+    let doc = ProfileDoc { profile: p, rules: Vec::new(), is_default: false, number: None };
+    let (xml, warnings) = lgs::export(&to_dto(&doc).unwrap());
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("Mode souris"));
+    assert!(xml.contains("contextid=\"G26\""), "direction binding still exported: {xml}");
+    let imported = lgs::import(&xml).unwrap();
+    assert_eq!(from_dto(imported.dto).unwrap().profile.stick.mode, StickMode::Keys);
+}
+
+#[test]
+fn stick_modes_are_bank_specific_and_old_shared_modes_are_preserved() {
+    for mode in ["keys", "gamepad", "mouse"] {
+        let text = format!("name = 'legacy'\n[stick]\nmode = '{mode}'\n");
+        let doc = from_toml(&text).unwrap();
+        assert!(MBank::ALL.into_iter().all(|bank| doc.profile.stick.mode_for(bank) == doc.profile.stick.mode));
+        assert_eq!(from_toml(&to_toml(&doc).unwrap()).unwrap(), doc);
+    }
+
+    let text = "name = 'three modes'\n[stick]\nmode = 'keys'\ndeadzone = 20\n\
+        [stick.bank_modes]\nM2 = 'mouse'\nM3 = 'gamepad'\n\
+        [banks.M1]\nSTICK_UP = 'W'\n[banks.M2]\nG23 = { mouse = 'Left' }\n";
+    let doc = from_toml(text).unwrap();
+    assert_eq!(doc.profile.stick.mode_for(MBank::M1), StickMode::Keys);
+    assert_eq!(doc.profile.stick.mode_for(MBank::M2), StickMode::Mouse);
+    assert_eq!(doc.profile.stick.mode_for(MBank::M3), StickMode::Gamepad);
+    assert!(doc.profile.uses_pad(), "an inactive bank can require the virtual pad");
+    let saved = to_toml(&doc).unwrap();
+    assert!(saved.contains("[stick.bank_modes]"), "{saved}");
+    assert_eq!(from_toml(&saved).unwrap(), doc);
+    let json = serde_json::to_string(&to_dto(&doc).unwrap()).unwrap();
+    let dto: FileDto = serde_json::from_str(&json).unwrap();
+    assert_eq!(from_dto(dto).unwrap(), doc);
+}
+
+#[test]
+fn stick_bank_modes_reject_unknown_banks_and_modes_in_toml_and_json() {
+    for fields in ["M4 = 'mouse'", "m2 = 'mouse'", "M2 = 'trackball'"] {
+        let text = format!("name = 'bad'\n[stick.bank_modes]\n{fields}\n");
+        assert!(from_toml(&text).is_err(), "accepted {fields}");
+    }
+    for fields in [r#""M4":"mouse""#, r#""m2":"mouse""#, r#""M2":"trackball""#] {
+        let text = format!(r#"{{"name":"bad","stick":{{"bank_modes":{{{fields}}}}}}}"#);
+        assert!(serde_json::from_str::<FileDto>(&text).is_err(), "accepted {fields}");
+    }
+}
+
+#[test]
+fn old_explicit_speed_is_retained_including_100_percent() {
+    for speed in [10, 100, 140, 200] {
+        let text = format!("name = 'legacy mouse'\n[stick]\nmode = 'mouse'\nmouse_speed = {speed}\n");
+        let doc = from_toml(&text).unwrap();
+        assert_eq!(doc.profile.stick.mouse_speed, Some(speed));
+        let saved = to_toml(&doc).unwrap();
+        assert!(saved.contains(&format!("mouse_speed = {speed}")), "{saved}");
+        assert_eq!(from_toml(&saved).unwrap(), doc);
+    }
+}
+
+#[test]
+fn lgs_export_warns_for_mouse_in_any_effective_bank_and_old_speed() {
+    let mut p = Profile { name: "bank mouse".into(), ..Profile::default() };
+    p.stick.bank_modes[MBank::M2.index()] = Some(StickMode::Mouse);
+    let mut doc = ProfileDoc { profile: p, rules: Vec::new(), is_default: false, number: None };
+    let (_, warnings) = lgs::export(&to_dto(&doc).unwrap());
+    assert!(warnings.iter().any(|w| w.contains("Mode souris")), "{warnings:?}");
+
+    doc.profile.stick.mode = StickMode::Mouse;
+    doc.profile.stick.bank_modes = [Some(StickMode::Keys); 3];
+    let (_, warnings) = lgs::export(&to_dto(&doc).unwrap());
+    assert!(!warnings.iter().any(|w| w.contains("Mode souris")), "no bank actually uses mouse: {warnings:?}");
+    doc.profile.stick.mouse_speed = Some(100);
+    let (_, warnings) = lgs::export(&to_dto(&doc).unwrap());
+    assert!(warnings.iter().any(|w| w.contains("Mode souris")), "the old speed override would be lost: {warnings:?}");
+}
+
+#[test]
+fn lgs_export_reports_effective_gamepad_banks_and_other_stick_settings() {
+    let mut p = Profile { name: "gamepad bank".into(), ..Profile::default() };
+    p.stick.bank_modes[MBank::M2.index()] = Some(StickMode::Gamepad);
+    let mut doc = ProfileDoc { profile: p, rules: Vec::new(), is_default: false, number: None };
+    let (xml, warnings) = lgs::export(&to_dto(&doc).unwrap());
+    assert!(warnings.iter().any(|w| w.contains("manette")), "{warnings:?}");
+    assert_eq!(from_dto(lgs::import(&xml).unwrap().dto).unwrap().profile.stick.mode_for(MBank::M2), StickMode::Keys);
+
+    doc.profile.stick.mode = StickMode::Gamepad;
+    doc.profile.stick.bank_modes = [Some(StickMode::Keys); 3];
+    let (_, warnings) = lgs::export(&to_dto(&doc).unwrap());
+    assert!(!warnings.iter().any(|w| w.contains("Mode manette")), "all effective banks are keys: {warnings:?}");
+    doc.profile.stick.bank_modes[MBank::M2.index()] = Some(StickMode::Mouse);
+    doc.profile.stick.bank_modes[MBank::M3.index()] = Some(StickMode::Gamepad);
+    doc.profile.stick.deadzone = 0.20;
+    doc.profile.stick.target = PadStick::Right;
+    let (_, warnings) = lgs::export(&to_dto(&doc).unwrap());
+    assert!(warnings.iter().any(|w| w.contains("Mode souris")), "{warnings:?}");
+    assert!(warnings.iter().any(|w| w.contains("Mode manette")), "{warnings:?}");
+    assert!(warnings.iter().any(|w| w.contains("Zone morte")), "{warnings:?}");
 }

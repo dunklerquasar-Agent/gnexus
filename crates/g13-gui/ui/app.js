@@ -52,6 +52,7 @@ const S = {
   base: {}, // bank → base colour (before brightness)
   game: null, // overlay: executable in the foreground when it was opened
   pinned: null, // profile pinned everywhere ("Tester partout")
+  stickMouseSpeed: 100, // global; older experimental profiles may override it
 };
 
 // ---- helpers --------------------------------------------------------------------
@@ -246,6 +247,10 @@ function resumeHeldSaves() {
   if (destructiveOperation || closeBusy()) return;
   for (const [id, pending] of pendingSaves) {
     if (!failedSaves.has(id) && !pending.timer) pending.timer = setTimeout(() => { pending.timer = null; flushProfile(id); }, 220);
+  }
+  if (queuedSpeed !== null && !speedJob) {
+    clearTimeout(speedTimer);
+    speedTimer = setTimeout(flushGlobalStickMouseSpeed, 180);
   }
   MacroLib.resume();
 }
@@ -499,34 +504,171 @@ function render() {
 }
 
 function stickCfg() {
-  return { mode: S.dto.stick?.mode || "keys", deadzone: S.dto.stick?.deadzone ?? 35, target: S.dto.stick?.target || "left" };
+  const st = S.dto.stick || {};
+  return { mode: st.bank_modes?.[S.bank] || st.mode || "keys", deadzone: st.deadzone ?? 35,
+    target: st.target || "left", mouse_speed: st.mouse_speed ?? S.stickMouseSpeed,
+    legacy_speed: st.mouse_speed != null };
 }
 
 function renderStick() {
-  const { mode, deadzone, target } = stickCfg();
+  const { mode, deadzone, target, mouse_speed, legacy_speed } = stickCfg();
+  $("#stick-mode-title").textContent = t("MODE STICK · {bank}", { bank: S.bank });
   Device.setStickMode(mode, target);
-  $("#device").classList.toggle("gamepad", mode !== "keys");
-  for (const b of $$("#stick-mode .pill-btn")) b.classList.toggle("on", b.dataset.mode === mode);
-  $("#stick-mode-label").textContent = mode === "keys" ? t("CLAVIER") : t("MANETTE");
+  $("#device").classList.toggle("gamepad", mode === "gamepad");
+  $("#device").classList.toggle("mouse-mode", mode === "mouse");
+  for (const b of $$("#stick-mode .pill-btn")) {
+    b.classList.toggle("on", b.dataset.mode === mode);
+    b.setAttribute("aria-pressed", String(b.dataset.mode === mode));
+  }
+  $("#stick-mode-label").textContent = mode === "keys" ? t("CLAVIER") : mode === "gamepad" ? t("MANETTE") : t("SOURIS");
   $("#deadzone").value = deadzone;
   $("#dz-val").textContent = deadzone + " %";
+  $("#mouse-speed").value = mouse_speed;
+  $("#mouse-speed-val").textContent = mouse_speed + " %";
+  $("#mouse-speed-scope").textContent = legacy_speed ? t("VITESSE DU PROFIL :") : t("VITESSE GLOBALE :");
+  const speedHelp = legacy_speed ? t("Ancien réglage propre au profil. Cliquez sur ↺ pour utiliser la vitesse globale.")
+    : t("Vitesse globale pour tous les profils sans réglage propre (ancien prototype).");
+  $("#mouse-speed").title = speedHelp;
+  $("#mouse-speed-scope").title = speedHelp;
+  $("#mouse-speed-reset").title = legacy_speed ? t("Utiliser la vitesse globale") : t("Rétablir la vitesse par défaut");
 }
 
 function setStick(patch, msg) {
-  const st = { ...stickCfg(), ...patch };
-  if (st.target === "left") delete st.target; // default, kept out of the file
-  S.dto.stick = st;
+  // Preserve the old profile-wide mode as a fallback. Changing one bank must
+  // never change the modes of the other banks, including old shared profiles.
+  const st = { ...(S.dto.stick || {}) };
+  if (patch.mode !== undefined) {
+    const modes = { ...(st.bank_modes || {}) };
+    if (patch.mode === (st.mode || "keys")) delete modes[S.bank];
+    else modes[S.bank] = patch.mode;
+    if (Object.keys(modes).length) st.bank_modes = modes;
+    else delete st.bank_modes;
+  }
+  for (const field of ["deadzone", "target", "mouse_speed"]) {
+    if (patch[field] === null) delete st[field];
+    else if (patch[field] !== undefined) st[field] = patch[field];
+  }
+  if (st.target === "left") delete st.target;
+  if (Object.keys(st).length) S.dto.stick = st;
+  else delete S.dto.stick;
   renderStick();
   save(msg);
 }
 
-// Both the G13 profile queue and the shared macro queue must drain. A new
-// edit can arrive while the other queue is being awaited, so recheck both.
+// Global speed is a preference, not a profile edit. Serialize writes so that
+// rapid slider input cannot let a slower older write overwrite a newer one.
+let speedTimer, queuedSpeed = null, failedSpeed = null, savingSpeed = false, speedRevision = 0, speedJob = null;
+// A notification is only a hint: an older event may be delivered after a
+// newer one. Re-read the authoritative preference, and repeat the read if a
+// notification arrived while it was in flight. Local drafts always win until
+// their write succeeds (or the user retries a failed write).
+let speedEventRevision = 0, reflectedSpeedEvents = 0, speedRefreshJob = null;
+function hasLocalSpeedWork() {
+  return queuedSpeed !== null || failedSpeed !== null || savingSpeed;
+}
+function showGlobalStickMouseSpeed(speed) {
+  S.stickMouseSpeed = speed;
+  if (S.dto) renderStick();
+}
+function refreshGlobalStickMouseSpeed() {
+  if (speedRefreshJob || hasLocalSpeedWork() || reflectedSpeedEvents === speedEventRevision) return speedRefreshJob;
+  const job = (async () => {
+    while (!hasLocalSpeedWork() && reflectedSpeedEvents !== speedEventRevision) {
+      const events = speedEventRevision, edits = speedRevision;
+      let settings;
+      try { settings = await invoke("get_settings"); }
+      catch { reflectedSpeedEvents = events; return; } // try again on the next notification
+      if (hasLocalSpeedWork() || edits !== speedRevision) return;
+      if (events !== speedEventRevision) continue;
+      showGlobalStickMouseSpeed(settings.stick_mouse_speed ?? 100);
+      reflectedSpeedEvents = events;
+    }
+  })();
+  speedRefreshJob = job;
+  const finish = () => {
+    if (speedRefreshJob !== job) return;
+    speedRefreshJob = null;
+    if (!hasLocalSpeedWork() && reflectedSpeedEvents !== speedEventRevision) refreshGlobalStickMouseSpeed();
+  };
+  job.then(finish, (error) => { reflectedSpeedEvents = speedEventRevision; console.error("stick speed refresh:", error); finish(); });
+  return job;
+}
+function noteStickMouseSpeedChanged() {
+  speedEventRevision++;
+  refreshGlobalStickMouseSpeed();
+}
+function setGlobalStickMouseSpeed(speed) {
+  S.stickMouseSpeed = speed;
+  queuedSpeed = speed;
+  failedSpeed = null; // the latest edit supersedes an older failed value
+  speedRevision++;
+  renderStick();
+  clearTimeout(speedTimer);
+  // Import/reset/reload freezes real input; hold synthetic or already-queued
+  // input as well until the replacement has finished.
+  if (!destructiveOperation) speedTimer = setTimeout(flushGlobalStickMouseSpeed, 180);
+}
+function flushGlobalStickMouseSpeed() {
+  clearTimeout(speedTimer);
+  if (speedJob) return speedJob;
+  savingSpeed = true;
+  const job = (async () => {
+    let ok = true;
+    while (queuedSpeed !== null) {
+      const speed = queuedSpeed;
+      queuedSpeed = null;
+      try {
+        await invoke("set_stick_mouse_speed", { speed });
+        failedSpeed = null;
+        ok = true;
+      } catch (e) {
+        // Retain the last failed value for an explicit flush/retry, without
+        // repeatedly hammering a failing disk from the debounce timer.
+        failedSpeed = speed;
+        ok = false;
+        toast(t("Vitesse globale non enregistrée : {e}", { e }), true);
+      }
+    }
+    // The settings snapshot can be older than a notification received while
+    // the read is in flight. In that case, refresh after the write finishes.
+    if (ok) {
+      const edits = speedRevision, events = speedEventRevision;
+      try {
+        const settings = await invoke("get_settings");
+        if (edits === speedRevision && queuedSpeed === null && failedSpeed === null && events === speedEventRevision) {
+          showGlobalStickMouseSpeed(settings.stick_mouse_speed ?? 100);
+          reflectedSpeedEvents = events;
+        }
+      } catch { reflectedSpeedEvents = events; } // keep local value; retry on a later notification
+    }
+    return ok;
+  })();
+  speedJob = job;
+  job.then(() => {
+    if (speedJob !== job) return;
+    speedJob = null;
+    savingSpeed = false;
+    if (queuedSpeed !== null) flushGlobalStickMouseSpeed();
+    else refreshGlobalStickMouseSpeed();
+  });
+  return job;
+}
+
 async function flushAllEdits() {
+  // A profile edit may arrive while a slow speed write is being awaited (or
+  // vice versa). Recheck both queues before declaring the page clean.
   for (;;) {
     if (!(await flushAllProfiles())) return false;
+    while (queuedSpeed !== null || speedJob || failedSpeed !== null) {
+      if (!speedJob && queuedSpeed === null && failedSpeed !== null) {
+        queuedSpeed = failedSpeed;
+        failedSpeed = null;
+      }
+      if (!(await flushGlobalStickMouseSpeed())) return false;
+    }
     if (!(await MacroLib.flush())) return false;
-    if (!pendingSaves.size && !saveWorkers.size && !failedSaves.size && !MacroLib.hasWork()) return true;
+    if (!pendingSaves.size && !saveWorkers.size && !failedSaves.size &&
+        queuedSpeed === null && !speedJob && failedSpeed === null && !MacroLib.hasWork()) return true;
   }
 }
 
@@ -1151,7 +1293,7 @@ async function replaceConfig(reset) {
   destructiveOperation = true; syncInert();
   try {
     if (!(await flushAllEdits())) return;
-    const id = S.editId, token = profileTokens.get(id), revision = editRevision, macroAtStart = MacroLib.revision;
+    const id = S.editId, token = profileTokens.get(id), revision = editRevision, speedAtStart = speedRevision, macroAtStart = MacroLib.revision;
     const n = await invoke(reset ? "reset_config" : "import_config");
     if (!reset && n == null) return;
     const macroChanged = MacroLib.revision !== macroAtStart;
@@ -1164,6 +1306,10 @@ async function replaceConfig(reset) {
     if (macroChanged) {
       toast(t("La bibliothèque a changé pendant l'import : examinez la file locale."), true);
       return;
+    }
+    if (speedRevision !== speedAtStart) {
+      toast(t("Vitesse modifiée pendant l'import : vérifiez et réessayez."), true);
+      return; // do not destroy the newer in-memory speed
     }
     sessionStorage.setItem("g13-toast", reset ? t("Configuration réinitialisée") : t("Configuration importée : {n} profil(s)", { n }));
     location.reload();
@@ -1229,10 +1375,11 @@ $("#stick-mode").addEventListener("click", (e) => {
   if (!b || !S.dto) return;
   const mode = b.dataset.mode;
   if (mode === stickCfg().mode) return;
-  // a gamepad stick wants a small dead zone, keys a large one: swap the defaults
-  const dz = stickCfg().deadzone;
-  const deadzone = mode === "gamepad" && dz === 35 ? 15 : mode === "keys" && dz === 15 ? 35 : dz;
-  setStick({ mode, deadzone }, mode === "gamepad" ? t("Stick en mode manette (joystick analogique)") : t("Stick en mode clavier"));
+  // The dead zone is shared by the profile's banks: do not silently change
+  // it when just one bank changes mode.
+  const message = mode === "gamepad" ? t("Stick en mode manette (joystick analogique)") :
+    mode === "mouse" ? t("Stick en mode souris : relâchez-le d'abord") : t("Stick en mode clavier");
+  setStick({ mode }, message);
   if (mode === "gamepad") checkGamepad();
 });
 
@@ -1341,7 +1488,9 @@ $("#btn-delete").addEventListener("click", async () => {
 function showReport(title, text, items) {
   $("#report-title").textContent = title;
   $("#report-text").textContent = text;
-  $("#report-list").innerHTML = items.map((s) => `<li>${esc(s)}</li>`).join("");
+  // Some fixed export-loss messages have UI translations; dynamic detail
+  // strings stay untouched. Escape either form before inserting markup.
+  $("#report-list").innerHTML = items.map((s) => `<li>${esc(Object.hasOwn(TR, s) ? t(s) : s)}</li>`).join("");
   $("#report-list").classList.toggle("hidden", !items.length);
   openSheet("#report");
 }
@@ -1600,9 +1749,17 @@ async function boot() {
   while (closeBusy()) await new Promise((resolve) => setTimeout(resolve, 100));
   bootReady = true;
   syncInert();
+  // Listen before taking the first settings snapshot: another window can
+  // change the speed while this window is booting.
+  await listen("stick-mouse-speed-changed", noteStickMouseSpeedChanged);
+  const bootEvents = speedEventRevision, bootEdits = speedRevision;
   // language and keyboard before anything is drawn
   let settings = {};
   try { settings = await invoke("get_settings"); } catch { /* mock */ }
+  if (bootEvents === speedEventRevision && bootEdits === speedRevision && !hasLocalSpeedWork()) {
+    showGlobalStickMouseSpeed(settings.stick_mouse_speed ?? 100);
+    reflectedSpeedEvents = bootEvents;
+  } else refreshGlobalStickMouseSpeed();
   LANG = pickLang(settings.language);
   if (!OVERLAY) invoke("ui_language", { lang: LANG }).catch(() => {});
   applyLayout(settings.keyboard_layout || LANG_LAYOUT[LANG], LANG);
@@ -1637,7 +1794,17 @@ async function boot() {
   $("#deadzone").addEventListener("input", (e) => {
     if (S.dto) setStick({ deadzone: +e.target.value });
   });
-
+  $("#mouse-speed").addEventListener("input", (e) => {
+    if (!S.dto) return;
+    const speed = +e.target.value;
+    if (stickCfg().legacy_speed) setStick({ mouse_speed: speed });
+    else setGlobalStickMouseSpeed(speed);
+  });
+  $("#mouse-speed-reset").addEventListener("click", () => {
+    if (!S.dto) return;
+    if (stickCfg().legacy_speed) setStick({ mouse_speed: null });
+    else setGlobalStickMouseSpeed(100);
+  });
   await listen("g13", ({ payload: ev }) => {
     switch (ev.type) {
       case "key": Device.setLive(ev.key, ev.pressed); break;
@@ -1648,6 +1815,8 @@ async function boot() {
       case "lcd": Device.setLcdFrame(ev.frame, S.dto ? lcdColor() : "#ffffff"); break;
       case "pinned": S.pinned = ev.id || null; renderProfileMenu(); break;
       case "gamepad_error": toast(t("Manette virtuelle : {m}", { m: ev.message }), true); break;
+      case "stick_mouse_error": toast(t("Souris du stick : {m}. Changez de profil ou rebranchez le G13 pour réessayer.", { m: ev.message }), true); break;
+      case "stick_mouse_paused": toast(t("Souris du stick en pause après une interruption : bougez puis relâchez le stick pour reprendre."), true); break;
       case "mouse": Mouse.update(ev.status); break;
       case "headset": Headset.update(ev.status); break;
     }
