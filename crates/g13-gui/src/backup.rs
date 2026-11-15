@@ -42,32 +42,46 @@ fn safe_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-fn toml_files(dir: &Path) -> Vec<(String, PathBuf)> {
-    let mut v: Vec<(String, PathBuf)> = fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("toml")))
-        .filter_map(|p| Some((p.file_stem()?.to_str()?.to_string(), p)))
-        .collect();
+fn toml_files(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    let mut v = Vec::new();
+    let entries = fs::read_dir(dir).map_err(|e| format!("{} : {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("{} : {e}", dir.display()))?;
+        let path = entry.path();
+        if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("toml")) { continue; }
+        let kind = entry.file_type().map_err(|e| format!("{} : {e}", path.display()))?;
+        if !kind.is_file() { return Err(format!("profil non ordinaire : {}", path.display())); }
+        let id = path.file_stem().and_then(|s| s.to_str())
+            .ok_or_else(|| format!("nom de profil non UTF-8 : {}", path.display()))?;
+        if !safe_id(id) { return Err(format!("identifiant de profil invalide : {id:?}")); }
+        if v.iter().any(|(existing, _): &(String, PathBuf)| existing.eq_ignore_ascii_case(id)) {
+            return Err(format!("identifiants de profil ambigus : {id:?}"));
+        }
+        v.push((id.to_string(), path));
+    }
     v.sort();
-    v
+    Ok(v)
 }
 
 /// Snapshot of the current configuration.
 pub fn collect(dir: &Path, settings: &Settings, autostart: bool) -> Result<Backup, String> {
     let mut profiles = BTreeMap::new();
-    for (id, path) in toml_files(dir) {
+    for (id, path) in toml_files(dir)? {
         let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         profiles.insert(id, text);
     }
     let mut files = BTreeMap::new();
     if let Some(config) = dir.parent() {
         for name in EXTRA_FILES {
-            if let Ok(text) = fs::read_to_string(config.join(name)) {
-                files.insert(name.to_string(), text);
-            }
+            let path = config.join(name);
+            let meta = match fs::symlink_metadata(&path) {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("{} : {e}", path.display())),
+            };
+            if !meta.file_type().is_file() { return Err(format!("fichier de configuration non ordinaire : {}", path.display())); }
+            let text = fs::read_to_string(&path).map_err(|e| format!("{} : {e}", path.display()))?;
+            files.insert(name.to_string(), text);
         }
     }
     Ok(Backup {
@@ -209,7 +223,7 @@ pub fn auto_path(dir: &Path, label: &str) -> Option<PathBuf> {
 /// Replace every profile file by those of `backup`.
 pub fn restore_profiles(dir: &Path, backup: &Backup) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    for (id, path) in toml_files(dir) {
+    for (id, path) in toml_files(dir)? {
         if !backup.profiles.contains_key(&id) {
             fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         }
@@ -223,7 +237,7 @@ pub fn restore_profiles(dir: &Path, backup: &Backup) -> Result<(), String> {
 
 /// Delete every profile and write the demo profile back.
 pub fn reset_profiles(dir: &Path) -> Result<(), String> {
-    for (_, path) in toml_files(dir) {
+    for (_, path) in toml_files(dir)? {
         fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     }
     g13_daemon::profiles::store::write_demo(dir).map_err(|e| e.to_string())
@@ -276,11 +290,11 @@ mod tests {
         fs::remove_file(dir.join("a.toml")).unwrap();
         fs::write(dir.join("c.toml"), "name = \"C\"\n").unwrap();
         restore_profiles(&dir, &back).unwrap();
-        let ids: Vec<String> = toml_files(&dir).into_iter().map(|(i, _)| i).collect();
+        let ids: Vec<String> = toml_files(&dir).unwrap().into_iter().map(|(i, _)| i).collect();
         assert_eq!(ids, ["a", "b"]);
 
         reset_profiles(&dir).unwrap();
-        let ids: Vec<String> = toml_files(&dir).into_iter().map(|(i, _)| i).collect();
+        let ids: Vec<String> = toml_files(&dir).unwrap().into_iter().map(|(i, _)| i).collect();
         assert_eq!(ids, ["demo"]);
         let _ = fs::remove_dir_all(dir.parent().unwrap());
     }

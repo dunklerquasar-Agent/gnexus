@@ -2,8 +2,32 @@
 // "g13" event stream; the edited model is the profile file itself (FileDto).
 "use strict";
 
-const { invoke } = window.__TAURI__.core;
+// Also set the property for DOM implementations that do not reflect the HTML attribute.
+document.body.inert = true;
+
+const { invoke: invokeNative } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
+// Long-running native operations already started before a close must finish
+// before the close handshake may acknowledge. No new ones start while frozen.
+const closeSensitive = new Set(["assign_game", "create_profile", "delete_profile", "import_lgs",
+  "import_config", "reset_config", "record_start", "record_stop", "set_settings", "set_language",
+  "backup_now", "export_config", "export_lgs"]);
+const closeSensitiveJobs = new Set();
+let closeOperation = false, frozenForQuit = false, reloadOperation = false, cancelSerial = 0, bootReady = false;
+const closeBusy = () => closeOperation || frozenForQuit || reloadOperation;
+function invoke(cmd, args) {
+  const sensitive = closeSensitive.has(cmd);
+  if (sensitive && closeBusy()) return Promise.reject(new Error("WINDOW_CLOSING: opération annulée"));
+  const job = Promise.resolve(invokeNative(cmd, args));
+  if (sensitive) {
+    closeSensitiveJobs.add(job);
+    job.then(() => closeSensitiveJobs.delete(job), () => closeSensitiveJobs.delete(job));
+  }
+  return job;
+}
+function syncInert() {
+  document.body.inert = !bootReady || closeBusy() || destructiveOperation;
+}
 /** Same page, two windows: the main one and the in-game overlay (#overlay). */
 const OVERLAY = location.hash === "#overlay";
 if (OVERLAY) document.documentElement.classList.add("overlay");
@@ -65,30 +89,205 @@ function bankActions(bank = S.bank) {
 
 // ---- saving -----------------------------------------------------------------------
 
-let saveTimer;
+// Each profile has its own immutable draft snapshots and serialized writer.
+// A failed draft remains in memory; normal navigation refuses to discard it.
+const pendingSaves = new Map(), saveWorkers = new Map(), failedSaves = new Map();
+const profileBases = new Map(), profileTokens = new Map();
+let editRevision = 0, loadRevision = 0, destructiveOperation = false;
+
+function normalizedProfile(dto) {
+  if (!dto || typeof dto !== "object") throw new Error("invalid profile");
+  dto.rules ||= [];
+  dto.macros ||= {};
+  return dto;
+}
+
+function snapshotProfile(snapshot) {
+  if (!snapshot || typeof snapshot.token !== "string" || !snapshot.token) throw new Error("invalid profile identity");
+  return { profile: normalizedProfile(snapshot.profile), token: snapshot.token };
+}
+
+function profileForSave(raw) {
+  const dto = structuredClone(raw);
+  // Keep half-typed rows in the visible draft, but do not persist them.
+  dto.rules = (dto.rules || []).filter((r) => (r.exe && r.exe.trim()) || (r.title && r.title.trim()))
+    .map((r) => {
+      const o = {};
+      if (r.exe && r.exe.trim()) o.exe = r.exe.trim();
+      if (r.title && r.title.trim()) o.title = r.title.trim();
+      return o;
+    });
+  return dto;
+}
+
+function explainProfileError(error) {
+  const raw = String(error), owner = raw.match(/RULE_OWNER_CONFLICT:([a-zA-Z0-9_-]+)/);
+  if (owner) return t("Une règle du profil {id} peut correspondre à la même fenêtre. Modifiez d'abord les associations ; cette modification n'a pas été enregistrée.", { id: owner[1] });
+  if (raw.includes("RULE_OWNERS_UNAVAILABLE:")) return t("Impossible de vérifier les associations : au moins un profil est illisible ou non pris en charge.");
+  if (raw.includes("COMBINED_RULE_CONFLICT:")) return t("Cette règle combine programme et titre. Modifiez-la directement au lieu de l'élargir automatiquement.");
+  if (raw.includes("CONFIG_OVERLAY_OPEN")) return t("Fermez d'abord l'overlay avant de remplacer la configuration.");
+  return raw;
+}
+
+function renderSaveProblem() {
+  const problem = failedSaves.get(S.editId);
+  $("#profile-save-banner").classList.toggle("hidden", !problem);
+  $("#profile-draft").classList.toggle("hidden", !problem);
+  if (problem) {
+    $("#profile-save-message").textContent = t("Non enregistré : {e}", { e: explainProfileError(problem) });
+    $("#profile-draft-data").textContent = JSON.stringify(S.dto, null, 2);
+  }
+}
+
+function holdFailedDraft(id, error, fallback) {
+  if (!pendingSaves.has(id) && fallback) pendingSaves.set(id, fallback);
+  const pending = pendingSaves.get(id);
+  if (pending?.timer) { clearTimeout(pending.timer); pending.timer = null; }
+  failedSaves.set(id, String(error));
+  if (id === S.editId) {
+    renderSaveProblem();
+    toast(t("Non enregistré : {e}", { e: explainProfileError(error) }), true);
+  }
+}
+
 /** Colour dialog while open: { target, h, s, v } (see openColor). */
 let CP = null;
 function save(msg) {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(async () => {
-    const dto = structuredClone(S.dto);
-    // half-typed rules are kept in the UI but not written
-    dto.rules = (dto.rules || []).filter((r) => (r.exe && r.exe.trim()) || (r.title && r.title.trim()))
-      .map((r) => {
-        const o = {};
-        if (r.exe && r.exe.trim()) o.exe = r.exe.trim();
-        if (r.title && r.title.trim()) o.title = r.title.trim();
-        return o;
-      });
+  if (!S.editId || !S.dto) return;
+  const id = S.editId, token = profileTokens.get(id), base = profileBases.get(id);
+  if (!token || !base) { holdFailedDraft(id, "profil sans base de modification"); return; }
+  editRevision++;
+  const previous = pendingSaves.get(id);
+  if (previous?.timer) clearTimeout(previous.timer);
+  const next = { raw: structuredClone(S.dto), base: structuredClone(base), token, msg, timer: null };
+  pendingSaves.set(id, next);
+  if (!failedSaves.has(id) && !destructiveOperation) {
+    next.timer = setTimeout(() => { next.timer = null; flushProfile(id); }, 220);
+  }
+  renderSaveProblem();
+}
+
+function rebuildBaseColors() {
+  S.base = {};
+  for (const b of ["M1", "M2", "M3"]) {
+    const c = hex2rgb(bankObj(b).color);
+    if (c) {
+      const m = Math.max(c.r, c.g, c.b, 1);
+      S.base[b] = { rgb: rgb2hex({ r: (c.r * 255) / m, g: (c.g * 255) / m, b: (c.b * 255) / m }), bright: Math.round((m / 255) * 100) };
+    }
+  }
+}
+
+async function drainProfile(id) {
+  while (!failedSaves.has(id) && pendingSaves.has(id)) {
+    const snapshot = pendingSaves.get(id);
+    if (snapshot.timer) clearTimeout(snapshot.timer);
+    pendingSaves.delete(id);
+    const sent = profileForSave(snapshot.raw);
     try {
-      await invoke("save_profile", { id: S.editId, profile: dto });
-      if (msg) toast(msg);
+      const response = snapshotProfile(await invoke("save_profile", {
+        id, base: snapshot.base, profile: sent, token: snapshot.token,
+      }));
+      if (response.token !== snapshot.token) throw new Error("PROFILE_REPLACED: profile identity changed");
+      const merged = response.profile, pending = pendingSaves.get(id);
+      const visible = S.editId === id && profileTokens.get(id) === snapshot.token ? S.dto : null;
+      // Do not give a newer local draft the remote version as its ancestor.
+      // Otherwise a follow-up save could silently overwrite a remote change.
+      if ((pending && profileDeltaConflicts(sent, pending.raw, merged)) ||
+          (visible && profileDeltaConflicts(sent, visible, merged))) {
+        const fallback = visible ? { raw: structuredClone(visible), base: structuredClone(snapshot.base), token: snapshot.token, timer: null } : snapshot;
+        holdFailedDraft(id, "PROFILE_CONFLICT: modifications simultanées", fallback);
+        return false;
+      }
+      if (pending) {
+        pending.base = rebaseProfileAncestor(sent, pending.raw, merged);
+        pending.raw = applyProfileDelta(sent, pending.raw, merged);
+      }
+      if (visible) {
+        const before = structuredClone(visible);
+        profileBases.set(id, rebaseProfileAncestor(sent, visible, merged));
+        const rebased = applyProfileDelta(sent, visible, merged);
+        if (!profileValueEqual(rebased, visible)) {
+          S.dto = rebased;
+          rebuildBaseColors();
+          render();
+          if (!profileValueEqual(before.rules || [], rebased.rules || []) && $("#advanced").classList.contains("open")) {
+            renderRules(); renderDetected();
+          }
+        }
+      }
+      if (snapshot.msg && S.editId === id) toast(snapshot.msg);
       refreshProfiles();
     } catch (e) {
-      toast(t("Non enregistré : {e}", { e }), true);
+      holdFailedDraft(id, e, snapshot);
+      return false;
     }
-  }, 220);
+  }
+  return !failedSaves.has(id);
 }
+
+function flushProfile(id) {
+  if (!id) return Promise.resolve(true);
+  if (saveWorkers.has(id)) return saveWorkers.get(id);
+  if (failedSaves.has(id)) { renderSaveProblem(); return Promise.resolve(false); }
+  let job;
+  job = drainProfile(id).finally(() => { if (saveWorkers.get(id) === job) saveWorkers.delete(id); });
+  saveWorkers.set(id, job);
+  return job;
+}
+
+async function flushAllProfiles() {
+  const ids = new Set([...pendingSaves.keys(), ...saveWorkers.keys(), ...failedSaves.keys()]);
+  for (const id of ids) if (!(await flushProfile(id))) return false;
+  return true;
+}
+
+function resumeHeldSaves() {
+  if (destructiveOperation || closeBusy()) return;
+  for (const [id, pending] of pendingSaves) {
+    if (!failedSaves.has(id) && !pending.timer) pending.timer = setTimeout(() => { pending.timer = null; flushProfile(id); }, 220);
+  }
+  MacroLib.resume();
+}
+
+function renderMacroLibraryProblem() {
+  const error = MacroLib.error || MacroLib.loadError;
+  const banner = $("#macro-save-banner"), draft = $("#macro-draft");
+  if (!banner || !draft) return;
+  banner.classList.toggle("hidden", !error);
+  draft.classList.toggle("hidden", !error);
+  if (!error) return;
+  let reason = error;
+  if (error === "MACRO_CONFIG_REPLACED") reason = t("La configuration a changé pendant une modification de la bibliothèque. Copiez la file, puis abandonnez-la avant de recharger.");
+  else if (error.includes("MACRO_LIBRARY_CONFLICT:")) reason = t("Cette macro a changé ailleurs. Copiez la file avant de l'abandonner, puis rechargez la bibliothèque.");
+  else if (error.includes("MACRO_LIBRARY_NAME_EXISTS:")) reason = t("Ce nom existe déjà dans la bibliothèque ; aucune macro n'a été écrasée.");
+  else if (error.includes("MACRO_LIBRARY_UNOBSERVED:")) reason = t("La bibliothèque n'était pas chargée au début de cette modification. Copiez la file avant de l'abandonner, puis rechargez la bibliothèque.");
+  $("#macro-save-message").textContent = t("Bibliothèque de macros : {e}", { e: reason });
+  $("#macro-draft-data").textContent = JSON.stringify(MacroLib.pending, null, 2);
+  $("#macro-draft-retry").disabled = !!(MacroLib.blocked || MacroLib.job || MacroLib.loading);
+  $("#macro-draft-discard").disabled = !!(MacroLib.job || MacroLib.loading || !MacroLib.pending.length);
+}
+$("#macro-save-review").addEventListener("click", () => openAdvanced("macros"));
+$("#macro-draft-retry").addEventListener("click", async () => {
+  if (MacroLib.blocked || MacroLib.job || MacroLib.loading) return;
+  if (MacroLib.pending.length) await MacroLib.flush();
+  else await MacroLib.ensure();
+  G13Macros.render();
+});
+$("#macro-draft-discard").addEventListener("click", async () => {
+  if (MacroLib.job || MacroLib.loading || !MacroLib.pending.length) return;
+  const revision = MacroLib.revision, snapshot = JSON.stringify(MacroLib.pending);
+  const ok = await ask(t("ABANDONNER LA FILE DE LA BIBLIOTHÈQUE ?"), "", { confirmOnly: true, ok: t("CONFIRMER") });
+  if (!ok) return;
+  if (revision !== MacroLib.revision || snapshot !== JSON.stringify(MacroLib.pending) || MacroLib.job || MacroLib.loading) {
+    toast(t("La file a changé ; réessayez."), true);
+    return;
+  }
+  if (MacroLib.discardPending()) {
+    toast(t("File de la bibliothèque abandonnée ; les copies dans les profils sont conservées."));
+    G13Macros.render();
+  }
+});
 
 // ---- profiles ---------------------------------------------------------------------
 
@@ -103,31 +302,73 @@ async function refreshProfiles() {
   renderStatus();
 }
 
+function installEditSnapshot(id, snapshot) {
+  const dto = snapshot.profile;
+  S.editId = id; S.dto = dto;
+  profileBases.set(id, structuredClone(dto));
+  profileTokens.set(id, snapshot.token);
+  rebuildBaseColors();
+  G13Macros.sel = null;
+  if (!OVERLAY) invoke("set_preview", { id }).catch(() => {});
+  if (!document.body.classList.contains("mouse-mode") && !document.body.classList.contains("headset-mode")) $("#ov-name").textContent = dto.name || id;
+  renderSaveProblem();
+  render();
+}
+
 async function loadEdit(id) {
+  if (destructiveOperation || closeBusy()) return false;
+  const revision = ++loadRevision;
   try {
-    const dto = await invoke("load_profile", { id });
-    S.editId = id;
-    S.dto = dto;
-    S.dto.rules ||= [];
-    S.dto.macros ||= {};
-    S.base = {};
-    for (const b of ["M1", "M2", "M3"]) {
-      const c = hex2rgb(bankObj(b).color);
-      if (c) {
-        const m = Math.max(c.r, c.g, c.b, 1);
-        S.base[b] = { rgb: rgb2hex({ r: (c.r * 255) / m, g: (c.g * 255) / m, b: (c.b * 255) / m }), bright: Math.round((m / 255) * 100) };
-      }
-    }
-    G13Macros.sel = null;
-    // while this window has the focus, the G13 uses the profile shown here
-    // (the overlay's preview is set by the back-end: the game's profile)
-    if (!OVERLAY) invoke("set_preview", { id }).catch(() => {});
-    if (!document.body.classList.contains("mouse-mode") && !document.body.classList.contains("headset-mode")) $("#ov-name").textContent = dto.name || id;
-    render();
+    if (!(await flushProfile(S.editId))) return false;
+    if (id !== S.editId && !(await flushProfile(id))) return false;
+    if (revision !== loadRevision) return false;
+    const beforeRead = editRevision;
+    const snapshot = snapshotProfile(await invoke("load_profile_edit", { id }));
+    if (closeBusy() || revision !== loadRevision || beforeRead !== editRevision) return false;
+    installEditSnapshot(id, snapshot);
+    return true;
   } catch (e) {
     toast(t("Profil illisible : {e}", { e }), true);
+    return false;
   }
 }
+
+// Failed drafts are exposed as selectable JSON and require an explicit
+// discard; they are not silently replaced by a later profile read.
+$("#profile-save-review").addEventListener("click", () => { if (S.dto) openAdvanced("apps"); });
+$("#profile-draft-retry").addEventListener("click", async () => {
+  const id = S.editId;
+  if (!id || destructiveOperation || !failedSaves.has(id)) return;
+  failedSaves.delete(id);
+  renderSaveProblem();
+  await flushProfile(id);
+});
+$("#profile-draft-discard").addEventListener("click", async () => {
+  const id = S.editId, error = failedSaves.get(id), token = profileTokens.get(id);
+  if (!id || !error || destructiveOperation) return;
+  const revision = editRevision, navigation = loadRevision, draft = structuredClone(S.dto);
+  if (!(await ask(t("ABANDONNER CE BROUILLON ET RECHARGER ?"), "", { confirmOnly: true, ok: t("CONFIRMER") }))) return;
+  const unchanged = () => S.editId === id && profileTokens.get(id) === token && failedSaves.get(id) === error &&
+    editRevision === revision && loadRevision === navigation && profileValueEqual(S.dto, draft);
+  if (!unchanged()) { toast(t("Le brouillon a changé ; réessayez."), true); return; }
+  destructiveOperation = true; syncInert();
+  try {
+    if (saveWorkers.has(id)) await saveWorkers.get(id);
+    if (!unchanged()) { toast(t("Le brouillon a changé ; réessayez."), true); return; }
+    const profiles = await invoke("list_profiles");
+    const next = profiles.find((p) => p.id === id) || profiles.find((p) => p.id === S.activeId) || profiles[0];
+    if (!next) throw new Error("aucun profil lisible");
+    const snapshot = snapshotProfile(await invoke("load_profile_edit", { id: next.id }));
+    if (!unchanged()) { toast(t("Le brouillon a changé ; réessayez."), true); return; }
+    const pending = pendingSaves.get(id); if (pending?.timer) clearTimeout(pending.timer);
+    pendingSaves.delete(id); failedSaves.delete(id); profileBases.delete(id); profileTokens.delete(id);
+    ++loadRevision;
+    S.profiles = profiles;
+    installEditSnapshot(next.id, snapshot);
+    toast(t("Brouillon abandonné et profils rechargés"));
+  } catch (e) { toast(t("Rechargement impossible : {e}", { e }), true); }
+  finally { destructiveOperation = false; syncInert(); resumeHeldSaves(); }
+});
 
 function renderProfileMenu() {
   const idx = S.profiles.findIndex((p) => p.id === S.editId);
@@ -195,9 +436,10 @@ function renderOverlayBar(cur) {
 $("#ov-profiles").addEventListener("click", async (e) => {
   const b = e.target.closest("button[data-id]");
   if (!b || b.dataset.id === S.editId) return;
-  await loadEdit(b.dataset.id);
-  // while the overlay has the focus, the G13 follows the profile shown here
-  invoke("set_preview", { id: b.dataset.id }).catch(() => {});
+  if (await loadEdit(b.dataset.id)) {
+    // while the overlay has the focus, the G13 follows the profile shown here
+    invoke("set_preview", { id: b.dataset.id }).catch(() => {});
+  }
 });
 
 $("#ov-assign").addEventListener("click", async () => {
@@ -206,13 +448,7 @@ $("#ov-assign").addEventListener("click", async () => {
     toast(t("« {name} » s'activera désormais dans {app}", { name: Mouse.softName(Mouse.softIndex()), app: S.game }));
     return;
   }
-  if (!S.game || !S.editId) return;
-  try {
-    await invoke("assign_game", { id: S.editId, exe: S.game });
-    await refreshProfiles();
-    await loadEdit(S.editId);
-    toast(t("« {name} » s'activera désormais dans {app}", { name: S.dto.name, app: S.game }));
-  } catch (e) { toast(String(e), true); }
+  if (S.game && S.editId) await bindApp(S.game);
 });
 
 /** Tell where the edited profile applies once this window loses the focus. */
@@ -282,6 +518,88 @@ function setStick(patch, msg) {
   S.dto.stick = st;
   renderStick();
   save(msg);
+}
+
+// Both the G13 profile queue and the shared macro queue must drain. A new
+// edit can arrive while the other queue is being awaited, so recheck both.
+async function flushAllEdits() {
+  for (;;) {
+    if (!(await flushAllProfiles())) return false;
+    if (!(await MacroLib.flush())) return false;
+    if (!pendingSaves.size && !saveWorkers.size && !failedSaves.size && !MacroLib.hasWork()) return true;
+  }
+}
+
+// All native routes (window X / Alt+F4 / overlay key / tray / restart) use the
+// same request. A cancelled/failed save vetoes close; never discard a draft.
+const closeRequests = [];
+let closeRunner = null;
+function hasUnsavedMouseWork() {
+  // The G502 editor owns a separate draft. Do not claim a successful close
+  // while that draft is dirty or its save is still awaiting device status.
+  return !!Mouse.saving || (!!Mouse.draft && Mouse.dirty());
+}
+function unresolvedCloseUi() {
+  return !!document.querySelector("#prompt.open") || !!CP || G13Macros.recording || !!Mouse.macroEd?.recording || hasUnsavedMouseWork();
+}
+function flushBeforeClose({ payload: token }) {
+  closeRequests.push(token);
+  if (closeRunner) return closeRunner;
+  // Commit change-only fields before freezing actual user input.
+  if (!unresolvedCloseUi()) document.activeElement?.blur();
+  closeOperation = true;
+  syncInert();
+  closeRunner = (async () => {
+    while (closeRequests.length) {
+      const token = closeRequests.shift(), serial = cancelSerial;
+      try {
+        const blockers = unresolvedCloseUi() || destructiveOperation || reloadOperation;
+        const actions = blockers ? [] : await Promise.allSettled([...closeSensitiveJobs]);
+        const actionsOk = actions.every((a) => a.status === "fulfilled");
+        const saved = !blockers && actionsOk && !unresolvedCloseUi() && !destructiveOperation &&
+          !reloadOperation && await flushAllEdits() && !unresolvedCloseUi();
+        const hold = await invoke("finish_window_close", { token, saved });
+        frozenForQuit = !!hold && serial === cancelSerial;
+        if (!saved) toast(hasUnsavedMouseWork()
+          ? t("Enregistrez ou annulez le brouillon de souris ; attendez la fin d'un enregistrement en cours.")
+          : t("Fermeture annulée : terminez le dialogue ou corrigez les modifications non enregistrées."), true);
+      } catch (e) {
+        // If delivery fails twice the native guard stays pending rather than
+        // allowing data loss. A broken IPC can require restarting the app.
+        await invoke("finish_window_close", { token, saved: false }).catch(() => {});
+        toast(t("Fermeture annulée : {e}", { e }), true);
+      }
+    }
+  })().finally(() => {
+    closeRunner = null;
+    closeOperation = false;
+    syncInert();
+    resumeHeldSaves();
+  });
+  return closeRunner;
+}
+function closeCancelled() {
+  cancelSerial++;
+  frozenForQuit = false;
+  syncInert();
+  resumeHeldSaves();
+}
+async function reloadAfterFlush() {
+  if (closeBusy() || destructiveOperation) return;
+  if (unresolvedCloseUi()) {
+    if (hasUnsavedMouseWork()) toast(t("Enregistrez ou annulez le brouillon de souris ; attendez la fin d'un enregistrement en cours."), true);
+    return;
+  }
+  reloadOperation = true;
+  syncInert();
+  try {
+    if (await flushAllEdits()) location.reload();
+    else toast(t("Actualisation annulée : des modifications n'ont pas pu être enregistrées."), true);
+  } finally {
+    reloadOperation = false;
+    syncInert();
+    resumeHeldSaves();
+  }
 }
 
 function renderColor() {
@@ -480,7 +798,7 @@ function renderPicker() {
     const all = S.pick?.macros ? S.pick.macros() : S.dto.macros || {};
     const names = Object.keys(all);
     const mode = (n) => t((MACRO_MODES.find(([m]) => m === (all[n].mode || "once")) || [])[1] || "");
-    if (!MacroLib.items) MacroLib.ensure().then(() => S.pickerTab === "macros" && renderPicker());
+    if (!MacroLib.items && !MacroLib.loadError) MacroLib.ensure().then((lib) => { if (lib && S.pickerTab === "macros") renderPicker(); });
     const lib = MacroLib.others(all);
     body.innerHTML = `<div class="tiles">${names.map((n) =>
       `<button class="tile wide${isCur({ macro: n })}" data-macro="${esc(n)}" title="${esc(mode(n))}">▶ ${esc(n)}</button>`).join("")}
@@ -521,32 +839,39 @@ $("#dance-grid").addEventListener("click", (e) => {
 });
 
 $("#picker-body").addEventListener("click", (e) => {
-  const t = e.target.closest("button");
-  if (!t) return;
-  if (t.dataset.code) {
-    const keys = [...S.mods].filter((m) => m !== t.dataset.code);
-    assign([...keys, t.dataset.code].join("+"));
-  } else if (t.dataset.mouse) {
-    assign(structuredClone(MOUSE[+t.dataset.mouse][0]));
-  } else if (t.dataset.special) {
-    assign({ special: t.dataset.special });
-  } else if (t.dataset.pad) {
-    assign({ pad: t.dataset.pad });
-  } else if (t.dataset.macro) {
-    assign({ macro: t.dataset.macro });
-  } else if (t.dataset.libmacro) {
+  const button = e.target.closest("button");
+  if (!button) return;
+  if (button.dataset.code) {
+    const keys = [...S.mods].filter((m) => m !== button.dataset.code);
+    assign([...keys, button.dataset.code].join("+"));
+  } else if (button.dataset.mouse) {
+    assign(structuredClone(MOUSE[+button.dataset.mouse][0]));
+  } else if (button.dataset.special) {
+    assign({ special: button.dataset.special });
+  } else if (button.dataset.pad) {
+    assign({ pad: button.dataset.pad });
+  } else if (button.dataset.macro) {
+    assign({ macro: button.dataset.macro });
+  } else if (button.dataset.libmacro) {
     // a macro of another profile: copied into this one, then bound
-    const name = t.dataset.libmacro;
+    const name = button.dataset.libmacro;
     const all = S.pick?.macros ? S.pick.macros() : S.dto.macros;
-    if (all && MacroLib.items?.[name]) all[name] = structuredClone(MacroLib.items[name]);
+    if (!MacroLib.copyInto(name, all)) {
+      toast(t("La macro n'est plus disponible ou existe déjà dans ce profil. Actualisez puis réessayez."), true);
+      renderPicker();
+      return;
+    }
     assign({ macro: name });
-  } else if (t.id === "macro-new-assign" && S.pick?.newMacro) {
+  } else if (button.id === "macro-new-assign" && S.pick?.newMacro) {
     const pick = S.pick;
     const name = pick.newMacro();
+    if (!name) return;
     assign({ macro: name });
     pick.openMacros?.();
-  } else if (t.id === "macro-new-assign") {
-    assign({ macro: newMacro() });
+  } else if (button.id === "macro-new-assign") {
+    const name = newMacro();
+    if (!name) return;
+    assign({ macro: name });
     openAdvanced("macros");
   }
 });
@@ -602,15 +927,23 @@ async function renderDetected() {
 }
 
 async function bindApp(exe) {
+  const id = S.editId, token = profileTokens.get(id), navigation = loadRevision;
+  if (!id || !token || destructiveOperation) return;
   try {
-    await invoke("assign_game", { id: S.editId, exe });
+    if (!(await flushProfile(id)) || closeBusy() || S.editId !== id || loadRevision !== navigation) return;
+    await invoke("assign_game", { id, exe, token });
     await refreshProfiles();
+    if (S.editId !== id || loadRevision !== navigation) return;
     const keepTab = S.advTab;
-    await loadEdit(S.editId);
+    if (!(await loadEdit(id))) return;
     S.advTab = keepTab;
     renderAdvanced();
     toast(t("« {name} » s'activera dans {app}", { name: S.dto.name, app: exe }));
-  } catch (e) { toast(String(e), true); }
+  } catch (e) {
+    if (String(e).includes("PROFILE_REPLACED:") && S.editId === id) {
+      holdFailedDraft(id, e, { raw: structuredClone(S.dto), base: structuredClone(profileBases.get(id)), token, timer: null });
+    } else toast(explainProfileError(e), true);
+  }
 }
 
 for (const id of ["#apps-running", "#apps-recent"]) {
@@ -621,9 +954,10 @@ for (const id of ["#apps-running", "#apps-recent"]) {
 }
 $("#apps-refresh").addEventListener("click", renderDetected);
 $("#rule-browse").addEventListener("click", async () => {
+  const id = S.editId, navigation = loadRevision;
   try {
     const exe = await invoke("pick_exe");
-    if (exe) await bindApp(exe);
+    if (exe && S.editId === id && loadRevision === navigation) await bindApp(exe);
   } catch (e) { toast(String(e), true); }
 });
 
@@ -649,6 +983,8 @@ $("#rules").addEventListener("click", (e) => {
 });
 $("#rule-add").addEventListener("click", () => {
   S.dto.rules.push({ exe: "" });
+  editRevision++; // even a blank row must survive an in-flight profile read
+  renderSaveProblem();
   renderRules();
   $$("#rules input.exe").pop()?.focus();
 });
@@ -782,6 +1118,7 @@ function showLastBackup(date) {
 }
 $("#set-backup-now").addEventListener("click", async () => {
   try {
+    if (!(await flushAllEdits()) || closeBusy()) return;
     const date = await invoke("backup_now");
     showLastBackup(date);
     toast(t("Configuration sauvegardée"));
@@ -792,6 +1129,7 @@ $("#set-open-dir").addEventListener("click", () => invoke("open_profiles_dir").c
 // language and picker keyboard: saved, then both windows reload in the new language
 async function writeLanguage() {
   try {
+    if (!(await flushAllEdits()) || closeBusy()) return;
     await invoke("set_language", { language: $("#set-lang").value || null, keyboardLayout: $("#set-layout").value || null });
   } catch (e) { toast(String(e), true); }
 }
@@ -800,27 +1138,46 @@ $("#set-layout").addEventListener("change", writeLanguage);
 
 $("#cfg-export").addEventListener("click", async () => {
   try {
+    if (!(await flushAllEdits())) return;
     const path = await invoke("export_config");
     if (path) toast(t("Configuration exportée : {path}", { path }));
   } catch (e) { toast(t("Export impossible : {e}", { e }), true); }
 });
-$("#cfg-import").addEventListener("click", async () => {
-  if (!(await ask(t("REMPLACER TOUS LES PROFILS ET PARAMÈTRES ?"), "", { confirmOnly: true, ok: t("IMPORTER") }))) return;
+async function replaceConfig(reset) {
+  if (destructiveOperation) return;
+  const title = reset ? t("TOUT REMETTRE PAR DÉFAUT ?") : t("REMPLACER TOUS LES PROFILS ET PARAMÈTRES ?");
+  if (!(await ask(title, "", { confirmOnly: true, ok: reset ? t("RÉINITIALISER") : t("IMPORTER") }))) return;
+  if (destructiveOperation) return;
+  destructiveOperation = true; syncInert();
   try {
-    const n = await invoke("import_config");
-    if (n == null) return;
-    sessionStorage.setItem("g13-toast", t("Configuration importée : {n} profil(s)", { n }));
+    if (!(await flushAllEdits())) return;
+    const id = S.editId, token = profileTokens.get(id), revision = editRevision, macroAtStart = MacroLib.revision;
+    const n = await invoke(reset ? "reset_config" : "import_config");
+    if (!reset && n == null) return;
+    const macroChanged = MacroLib.revision !== macroAtStart;
+    MacroLib.configReplaced();
+    if (editRevision !== revision && id && S.editId === id) {
+      holdFailedDraft(id, "PROFILE_REPLACED: configuration remplacée pendant l'édition",
+        { raw: structuredClone(S.dto), base: structuredClone(profileBases.get(id)), token, timer: null });
+      return;
+    }
+    if (macroChanged) {
+      toast(t("La bibliothèque a changé pendant l'import : examinez la file locale."), true);
+      return;
+    }
+    sessionStorage.setItem("g13-toast", reset ? t("Configuration réinitialisée") : t("Configuration importée : {n} profil(s)", { n }));
     location.reload();
-  } catch (e) { toast(t("Import impossible : {e}", { e }), true); }
-});
-$("#cfg-reset").addEventListener("click", async () => {
-  if (!(await ask(t("TOUT REMETTRE PAR DÉFAUT ?"), "", { confirmOnly: true, ok: t("RÉINITIALISER") }))) return;
-  try {
-    await invoke("reset_config");
-    sessionStorage.setItem("g13-toast", t("Configuration réinitialisée"));
-    location.reload();
-  } catch (e) { toast(t("Réinitialisation impossible : {e}", { e }), true); }
-});
+  } catch (e) {
+    if (String(e).includes("CONFIG_MAY_BE_PARTIAL:")) {
+      MacroLib.configReplaced();
+      if (S.editId) holdFailedDraft(S.editId, e, { raw: structuredClone(S.dto), base: structuredClone(profileBases.get(S.editId)), token: profileTokens.get(S.editId), timer: null });
+    }
+    const reason = explainProfileError(e);
+    toast(reset ? t("Réinitialisation impossible : {e}", { e: reason }) : t("Import impossible : {e}", { e: reason }), true);
+  } finally { destructiveOperation = false; syncInert(); resumeHeldSaves(); }
+}
+$("#cfg-import").addEventListener("click", () => replaceConfig(false));
+$("#cfg-reset").addEventListener("click", () => replaceConfig(true));
 $("#cfg-backups").addEventListener("click", () => invoke("open_backups_dir").catch((e) => toast(String(e), true)));
 $("#set-backup-open").addEventListener("click", () => invoke("open_backups_dir").catch((e) => toast(String(e), true)));
 
@@ -889,15 +1246,20 @@ async function checkGamepad() {
 }
 $("#btn-dup").addEventListener("click", async () => {
   if (!S.dto) return;
+  const from = S.editId, navigation = loadRevision;
   const name = await ask(t("DUPLIQUER LE PROFIL"), t("{name} (copie)", { name: S.dto.name }));
-  if (!name) return;
-  try { const id = await invoke("create_profile", { name, from: S.editId }); await refreshProfiles(); await loadEdit(id); toast(t("Profil dupliqué")); }
-  catch (e) { toast(String(e), true); }
+  if (!name || S.editId !== from || loadRevision !== navigation) return;
+  try {
+    if (!(await flushProfile(from)) || S.editId !== from || loadRevision !== navigation) return;
+    const id = await invoke("create_profile", { name, from }); await refreshProfiles();
+    if (await loadEdit(id)) toast(t("Profil dupliqué"));
+  } catch (e) { toast(String(e), true); }
 });
 $("#btn-rename").addEventListener("click", async () => {
   if (!S.dto) return;
+  const id = S.editId, navigation = loadRevision;
   const name = await ask(t("RENOMMER LE PROFIL"), S.dto.name);
-  if (!name) return;
+  if (!name || id !== S.editId || navigation !== loadRevision) return;
   S.dto.name = name;
   render();
   save(t("Profil renommé"));
@@ -940,16 +1302,39 @@ $("#clear-bank").addEventListener("click", () => clearBanks([S.bank]));
 $("#clear-all").addEventListener("click", () => clearBanks(["M1", "M2", "M3"]));
 
 $("#btn-delete").addEventListener("click", async () => {
-  if (!S.dto) return;
-  const ok = await ask(t("SUPPRIMER « {name} » ?", { name: S.dto.name }), "", { confirmOnly: true, ok: t("SUPPRIMER") });
-  if (!ok) return;
+  if (!S.dto || destructiveOperation) return;
+  const id = S.editId, token = profileTokens.get(id), navigation = loadRevision, revision = editRevision;
+  const draft = structuredClone(S.dto);
+  const ok = await ask(t("SUPPRIMER « {name} » ?", { name: draft.name }), "", { confirmOnly: true, ok: t("SUPPRIMER") });
+  if (!ok || destructiveOperation) return;
+  const unchanged = () => S.editId === id && profileTokens.get(id) === token && loadRevision === navigation &&
+    editRevision === revision && profileValueEqual(S.dto, draft);
+  if (!unchanged()) { toast(t("Le profil affiché a changé ; confirmez à nouveau la suppression."), true); return; }
+  destructiveOperation = true; syncInert();
   try {
-    await invoke("delete_profile", { id: S.editId });
+    if (!(await flushProfile(id))) return;
+    if (!unchanged()) { toast(t("Le profil affiché a changé ; confirmez à nouveau la suppression."), true); return; }
+    const expected = profileForSave(profileBases.get(id));
+    await invoke("delete_profile", { id, expected, token });
+    if (!unchanged()) {
+      holdFailedDraft(id, "PROFILE_REPLACED: le profil a été supprimé pendant l'édition",
+        { raw: structuredClone(S.dto), base: structuredClone(profileBases.get(id)), token, timer: null });
+      return;
+    }
     await refreshProfiles();
+    if (!unchanged()) {
+      holdFailedDraft(id, "PROFILE_REPLACED: le profil a été supprimé pendant l'édition",
+        { raw: structuredClone(S.dto), base: structuredClone(profileBases.get(id)), token, timer: null });
+      return;
+    }
+    profileBases.delete(id); profileTokens.delete(id); pendingSaves.delete(id); failedSaves.delete(id);
+    S.editId = null; S.dto = null;
     const next = S.profiles.find((p) => p.id === S.activeId) || S.profiles[0];
+    destructiveOperation = false; syncInert();
     if (next) await loadEdit(next.id);
     toast(t("Profil supprimé"));
   } catch (e) { toast(String(e), true); }
+  finally { destructiveOperation = false; syncInert(); resumeHeldSaves(); }
 });
 // ---- Logitech Gaming Software import / export -------------------------------------------------
 
@@ -963,22 +1348,28 @@ function showReport(title, text, items) {
 
 $("#btn-import").addEventListener("click", async () => {
   try {
+    if (!(await flushAllEdits()) || closeBusy()) return;
     const r = await invoke("import_lgs");
     if (!r) return; // cancelled
     await refreshProfiles();
-    await loadEdit(r.id);
+    if (!(await loadEdit(r.id))) {
+      toast(t("Profil importé, mais l'affichage n'a pas changé ; vérifiez le brouillon."), true);
+      return;
+    }
     if (r.skipped.length) {
       showReport("IMPORT LGS", t("Profil « {name} » importé. Ces éléments n'ont pas pu être repris :", { name: r.name }), r.skipped);
     } else {
       toast(t("Profil « {name} » importé", { name: r.name }));
     }
-  } catch (e) { toast(t("Import impossible : {e}", { e }), true); }
+  } catch (e) { toast(t("Import impossible : {e}", { e: explainProfileError(e) }), true); }
 });
 
 $("#btn-export").addEventListener("click", async () => {
   if (!S.editId) return;
   try {
-    const skipped = await invoke("export_lgs", { id: S.editId });
+    const id = S.editId;
+    if (!(await flushProfile(id))) return;
+    const skipped = await invoke("export_lgs", { id });
     if (skipped == null) return; // cancelled
     if (skipped.length) {
       showReport("EXPORT LGS", t("Profil exporté. Ces éléments ne passent pas, ou pas entièrement, dans Logitech Gaming Software :"), skipped);
@@ -993,13 +1384,16 @@ $("#btn-advanced").addEventListener("click", () => openAdvanced());
 $("#offline-edit").addEventListener("click", () => { S.offlineEdit = true; renderOffline(); });
 $("#scrim").addEventListener("click", () => closeSheets());
 $$("[data-close]").forEach((b) => b.addEventListener("click", () => closeSheets()));
+async function closeOverlayFromPage() {
+  if (await flushAllEdits()) await invoke("close_overlay");
+}
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   const open = document.querySelector(".sheet.open, .modal.open");
   if (open || !OVERLAY) closeSheets();
-  else invoke("close_overlay");
+  else closeOverlayFromPage();
 });
-$("#ov-close").addEventListener("click", () => { closeSheets(); invoke("close_overlay"); });
+$("#ov-close").addEventListener("click", () => { closeOverlayFromPage(); });
 
 $("#bank-list").addEventListener("click", (e) => {
   const b = e.target.closest("[data-bank]");
@@ -1194,6 +1588,18 @@ $("#set-access-record").addEventListener("click", () => grantAccess(true));
 // ---- boot ------------------------------------------------------------------------------------
 
 async function boot() {
+  // Register both event listeners before enabling any interaction: unready
+  // windows may close immediately, so they must not yet hold editable drafts.
+  await listen("flush-before-close", flushBeforeClose);
+  await listen("flush-close-cancelled", closeCancelled);
+  for (;;) {
+    try { if (await invoke("window_ready")) break; }
+    catch (e) { console.error("window readiness:", e); }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  while (closeBusy()) await new Promise((resolve) => setTimeout(resolve, 100));
+  bootReady = true;
+  syncInert();
   // language and keyboard before anything is drawn
   let settings = {};
   try { settings = await invoke("get_settings"); } catch { /* mock */ }
@@ -1202,7 +1608,7 @@ async function boot() {
   applyLayout(settings.keyboard_layout || LANG_LAYOUT[LANG], LANG);
   translateDom();
   fillOverlayKeys();
-  listen("language-changed", () => location.reload());
+  listen("language-changed", reloadAfterFlush);
   const pending = sessionStorage.getItem("g13-toast");
   if (pending) { sessionStorage.removeItem("g13-toast"); setTimeout(() => toast(pending), 300); }
 

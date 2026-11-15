@@ -20,11 +20,37 @@
     },
     notepad: { name: "Bloc-notes", rules: [{ exe: "notepad.exe" }], banks: { M1: { color: "#0000FF", G1: "F5" }, M2: {}, M3: {} }, macros: {} },
   };
+  // Development mock only. It models GUI sessions, not native file locking.
+  const tokens = new Map();
+  let nextToken = 0;
+  const mockToken = (id) => {
+    if (!profiles[id]) throw "missing profile";
+    if (!tokens.has(id)) tokens.set(id, String(++nextToken));
+    return tokens.get(id);
+  };
+  const requireToken = (id, token) => {
+    if (!tokens.has(id) || tokens.get(id) !== token) throw "PROFILE_REPLACED: mock session changed";
+  };
+  const editSnapshot = (id) => ({ profile: structuredClone(profiles[id]), token: mockToken(id) });
+  const asciiLower = (s) => String(s || "").replace(/[A-Z]/g, (c) => c.toLowerCase());
+  const exeKey = (s) => asciiLower(s).replace(/\.exe$/, "");
+  const overlaps = (a, b) => {
+    if ((a.exe == null && a.title == null) || (b.exe == null && b.title == null)) return false;
+    return a.exe != null && b.exe != null ? exeKey(a.exe) === exeKey(b.exe) : true;
+  };
+  const checkOwners = (id, rules) => {
+    for (const [other, profile] of Object.entries(profiles)) {
+      if (other !== id && rules.some((r) => (profile.rules || []).some((old) => overlaps(r, old))))
+        throw `RULE_OWNER_CONFLICT:${other}`;
+    }
+  };
   const q = new URLSearchParams(location.search);
   let settings = { autostart: false, start_minimized: true, close_to_tray: true, overlay_key: "G25", profiles_dir: "C:\\Users\\…\\g13d\\config\\profiles",
     language: q.get("lang"), keyboard_layout: q.get("kb") };
   const listeners = [];
-  const emit = (payload) => listeners.filter((l) => l.name === "g13").forEach((l) => l.cb({ payload }));
+  let closeToken = 0;
+  const emitEvent = (name, payload) => listeners.filter((l) => l.name === name).forEach((l) => l.cb({ payload }));
+  const emit = (payload) => emitEvent("g13", payload);
   let headset = q.has("nohs") ? { present: false, connected: false } : { present: true, connected: !q.has("hsoff"), name: "PRO X Wireless",
     battery: 70, voltage_mv: 3958, charging: true, sidetone: 0, sleep_minutes: 10,
     volume: 96, muted: false, eq_installed: q.has("eq"),
@@ -41,6 +67,8 @@
       gshift: [{ mouse: "Left" }, { mouse: "Right" }, "LeftCtrl+T", { mouse: "Back" }, null, { mouse: "Forward" }, "LeftCtrl+LeftShift+Tab",
         "LeftCtrl+Tab", "LeftCtrl+0", "LeftCtrl+Z", "LeftCtrl+X", null, null, null, null, null] },
   };
+  const macroLibrary = Object.assign(Object.create(null), { "reload-fast": { mode: "once", steps: ["down R", "wait 20", "up R"] },
+    "spam-clic": { mode: "repeat_while_held", steps: ["mouse_down Left", "wait 30", "mouse_up Left", "wait 60"] } });
   const commands = {
     get_status: () => ({ connected: !location.hash.includes("offline"), bank: "M1", active_profile: "demo", recording: false, display_on: true, dry_run: true, error: null }),
     list_profiles: () => Object.entries(profiles).map(([id, p], i) => ({ id, number: i + 1, name: p.name, default: !!p.default, apps: p.rules.map((r) => r.exe || r.title), error: null })),
@@ -52,23 +80,47 @@
       running: [{ exe: "Notepad.exe", title: "Sans titre – Bloc-notes" }, { exe: "zen.exe", title: "Twitch — Zen Browser" }],
       recent: [{ exe: "wardogs.exe", title: "WARDOGS" }],
     }),
-    assign_game: ({ id, exe }) => { profiles[id].rules.push({ exe }); },
+    assign_game: ({ id, exe, token }) => {
+      requireToken(id, token);
+      exe = exe.trim();
+      if (!exe) throw "aucune application";
+      if (profiles[id].rules.some((r) => r.exe != null && exeKey(r.exe) === exeKey(exe) && r.title != null)) throw `COMBINED_RULE_CONFLICT:${id}`;
+      checkOwners(id, [{ exe }]);
+      if (!profiles[id].rules.some((r) => r.exe != null && exeKey(r.exe) === exeKey(exe))) profiles[id].rules.push({ exe });
+    },
     load_profile: ({ id }) => structuredClone(profiles[id]),
-    save_profile: ({ id, profile }) => {
-      if (profile.default) for (const p of Object.values(profiles)) p.default = false;
-      profiles[id] = structuredClone(profile);
-      console.log("[mock] saved", id, profile);
+    load_profile_edit: ({ id }) => editSnapshot(id),
+    save_profile: ({ id, base, profile, token }) => {
+      requireToken(id, token);
+      if (!profiles[id]) throw "missing profile";
+      if (profileDeltaConflicts(base, profile, profiles[id])) throw "PROFILE_CONFLICT: mock concurrent edit";
+      const merged = applyProfileDelta(base, profile, profiles[id]);
+      const added = (merged.rules || []).filter((r) => !(base.rules || []).some((x) => profileValueEqual(r, x)) &&
+        !(profiles[id].rules || []).some((x) => profileValueEqual(r, x)));
+      checkOwners(id, added);
+      if (merged.default) for (const [other, p] of Object.entries(profiles)) if (other !== id) p.default = false;
+      profiles[id] = merged;
+      return editSnapshot(id);
     },
     create_profile: ({ name, from }) => {
-      const id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      const base = name.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "profil";
+      let id = base, i = 1;
+      while (profiles[id]) id = `${base}-${++i}`;
       profiles[id] = from ? { ...structuredClone(profiles[from]), name, default: false, rules: [] } : { name, rules: [], banks: { M1: {}, M2: {}, M3: {} }, macros: {} };
+      tokens.delete(id);
       return id;
     },
-    delete_profile: ({ id }) => { delete profiles[id]; },
+    delete_profile: ({ id, expected, token }) => {
+      requireToken(id, token);
+      if (!profileValueEqual(expected, profiles[id])) throw "PROFILE_DELETE_CONFLICT: mock profile changed";
+      delete profiles[id]; tokens.delete(id);
+    },
     get_settings: () => settings,
     set_settings: (a) => { settings = { ...settings, autostart: a.autostart, start_minimized: a.startMinimized, close_to_tray: a.closeToTray, overlay_key: a.overlayKey, overlay_position: a.overlayPosition, auto_backup: a.autoBackup, auto_backup_keep: a.autoBackupKeep }; },
     backup_now: () => (settings.last_backup = "2026-10-17 15:30"),
-    close_overlay: () => {},
+    window_ready: () => true,
+    close_overlay: () => emitEvent("flush-before-close", ++closeToken),
+    finish_window_close: () => false,
     open_profiles_dir: () => {},
     app_version: () => "0.18.0",
     open_link: ({ which }) => { console.log("open_link", which); },
@@ -80,8 +132,8 @@
       location.href = u.toString();
     },
     export_config: () => "C:\\Users\\…\\G Nexus.g13backup",
-    import_config: () => 2,
-    reset_config: () => {},
+    import_config: () => { tokens.clear(); return 2; },
+    reset_config: () => { tokens.clear(); },
     open_backups_dir: () => {},
     ui_language: () => {},
     get_headset: () => structuredClone(headset),
@@ -112,9 +164,24 @@
     revert_mouse: () => console.log("[mock] revert"),
     set_mouse_soft_default: ({ index }) => { mouse = { ...mouse, soft_default: index }; emit({ type: "mouse", status: structuredClone(mouse) }); },
     pin_mouse_soft: ({ index }) => { mouse = { ...mouse, soft_pinned: index, soft_active: index ?? mouse.soft_default ?? 0 }; emit({ type: "mouse", status: structuredClone(mouse) }); },
-    macro_library: () => ({ "reload-fast": { mode: "once", steps: ["down R", "wait 20", "up R"] }, "spam-clic": { mode: "repeat_while_held", steps: ["mouse_down Left", "wait 30", "mouse_up Left", "wait 60"] } }),
-    save_library_macro: (a) => console.log("[mock] library +", a.name),
-    delete_library_macro: (a) => console.log("[mock] library -", a.name),
+    macro_library: () => structuredClone(macroLibrary),
+    save_library_macro: ({ name, mac, old, expected, expectedOld }) => {
+      const prev = Object.hasOwn(macroLibrary, name) ? macroLibrary[name] : null;
+      if (old && old !== name && expected != null) throw `MACRO_LIBRARY_NAME_EXISTS:${name}`;
+      if (profileValueEqual(prev, mac) && (!old || old === name || !Object.hasOwn(macroLibrary, old))) return;
+      if (!profileValueEqual(prev, expected ?? null)) throw `MACRO_LIBRARY_CONFLICT:${name}`;
+      if (old && old !== name) {
+        const was = Object.hasOwn(macroLibrary, old) ? macroLibrary[old] : null;
+        if (!profileValueEqual(was, expectedOld ?? null)) throw `MACRO_LIBRARY_CONFLICT:${old}`;
+        delete macroLibrary[old];
+      }
+      macroLibrary[name] = structuredClone(mac);
+    },
+    delete_library_macro: ({ name, expected }) => {
+      if (!Object.hasOwn(macroLibrary, name)) return;
+      if (!profileValueEqual(macroLibrary[name], expected ?? null)) throw `MACRO_LIBRARY_CONFLICT:${name}`;
+      delete macroLibrary[name];
+    },
     set_mouse_host: ({ on }) => {
       if (on && !mouse.soft_profiles.length) mouse.soft_profiles = [{ name: "", apps: [], settings: structuredClone(mouse.settings) }];
       mouse = { ...mouse, host: on, soft_active: on ? 0 : null, message: on ? "Temps réel : G Nexus pilote la souris" : "Profils intégrés de la souris réactivés", error: false };

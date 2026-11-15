@@ -694,6 +694,8 @@ html.overlay body {
 }
 html.overlay .top, html.overlay .profile-row, html.overlay .scope-bar:not(.ms-bar), html.overlay .banner, html.overlay .stage .rail.right,
 html.overlay .bottom, html.overlay #offline, html.overlay .stage .rail-group:first-child { display: none !important; }
+/* Unsaved drafts must remain discoverable in the overlay too. */
+html.overlay #profile-save-banner:not(.hidden), html.overlay #macro-save-banner:not(.hidden) { display: flex !important; }
 /* overlay on the mouse: its profile pills, the drawing, NORMAL / G-SHIFT at the top right */
 html.overlay .ms-stage { grid-template-columns: 78px 1fr 0; }
 /* narrow panel: the layer switch goes down (the callouts use the top), no help text */
@@ -815,3 +817,7 @@ html.overlay .modal { width: 92vw; }
 .hidden-input { position: fixed; left: -100px; top: -100px; opacity: 0; }
 .num-input { width: 80px; height: 32px; padding: 0 8px; border-radius: 8px; border: 1.5px solid var(--line-dim); background: var(--bg); color: var(--text); font: 15px var(--font); }
 .backup-last { font-size: 13px; margin-right: auto; }
+
+/* A failed profile draft is selectable for manual recovery. */
+.rule-conflict { margin: 12px 0; padding: 12px; border: 1px solid #d99343; border-radius: 8px; }
+.rule-conflict pre { max-height: 220px; overflow: auto; white-space: pre-wrap; user-select: text; }

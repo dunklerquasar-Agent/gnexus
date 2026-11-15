@@ -14,27 +14,195 @@
 const MacroLib = {
   items: null,
   loading: null,
-  async ensure() {
-    if (this.items) return this.items;
-    this.loading ??= invoke("macro_library").then((l) => { this.items = l || {}; return this.items; }).catch(() => { this.items = {}; return this.items; });
-    return this.loading;
+  pending: [],
+  active: null,
+  job: null,
+  timer: null,
+  error: null,
+  loadError: null,
+  blocked: false,
+  revision: 0,
+  generation: 0,
+
+  notify() {
+    if (typeof renderMacroLibraryProblem === "function") renderMacroLibraryProblem();
   },
-  timers: {},
-  /** Remember `name` (debounced: a step being typed is saved once). */
-  put(name, m, old = null) {
-    if (!this.items || !m) return;
-    if (old && old !== name) delete this.items[old];
-    this.items[name] = structuredClone(m);
-    clearTimeout(this.timers[name]);
-    this.timers[name] = setTimeout(() => invoke("save_library_macro", { name, mac: this.items[name], old }).catch(() => {}), old ? 0 : 400);
+  apply(view, op) {
+    if (op.kind === "put") {
+      if (op.old && op.old !== op.name) delete view[op.old];
+      view[op.name] = structuredClone(op.mac);
+    } else delete view[op.name];
+  },
+  prepare(view, op) {
+    const value = (name) => Object.hasOwn(view, name) ? structuredClone(view[name]) : null;
+    op.expected = value(op.name);
+    if (op.kind === "put") op.expectedOld = op.old ? value(op.old) : null;
+    this.apply(view, op);
+  },
+  ensure(forFlush = false) {
+    if (this.items) return Promise.resolve(this.items);
+    if (this.loading) return this.loading;
+    if (!forFlush && (destructiveOperation || closeBusy())) return Promise.resolve(null);
+    const generation = this.generation;
+    let job;
+    job = Promise.resolve().then(() => invoke("macro_library")).then((lib) => {
+      if (generation !== this.generation) return null;
+      if (!lib || typeof lib !== "object" || Array.isArray(lib)) throw new Error("invalid macro library");
+      const view = Object.assign(Object.create(null), structuredClone(lib));
+      const staged = new Set();
+      let unobserved = null;
+      for (const op of this.pending) {
+        // An edit made before this read completed did not observe the shared
+        // value. Never promote a later, possibly concurrent value to its CAS
+        // base. A name produced by an earlier queued operation is known.
+        if (op.unobserved) {
+          const affected = op.kind === "put" && op.old ? [op.name, op.old] : [op.name];
+          for (const name of affected) {
+            const identicalPut = op.kind === "put" && !op.old && name === op.name && profileValueEqual(view[name], op.mac);
+            if (!staged.has(name) && Object.hasOwn(view, name) && !identicalPut) unobserved ??= name;
+          }
+        }
+        this.prepare(view, op);
+        staged.add(op.name);
+        if (op.old) staged.add(op.old);
+      }
+      this.items = view;
+      this.loadError = null;
+      if (unobserved !== null) {
+        this.blocked = true;
+        this.error = `MACRO_LIBRARY_UNOBSERVED:${unobserved}`;
+      }
+      this.notify();
+      return view;
+    }).catch((e) => {
+      if (generation !== this.generation) return null;
+      this.loadError = String(e);
+      this.notify();
+      toast(t("Chargement de la bibliothèque de macros impossible : {e}", { e }), true);
+      return null;
+    }).finally(() => { if (this.loading === job) { this.loading = null; this.notify(); } });
+    this.loading = job;
+    this.notify();
+    return job;
+  },
+  schedule(delay = 400) {
+    clearTimeout(this.timer);
+    this.timer = null;
+    if (destructiveOperation || closeBusy() || this.blocked || this.error || this.loadError) return;
+    this.timer = setTimeout(() => { this.timer = null; this.flush(); }, delay);
+  },
+  resume() {
+    if (this.pending.length && !this.job) this.schedule();
+  },
+  /** Queue immutable operations; do not drop edits while the initial load runs. */
+  put(name, mac, old = null) {
+    if (!name || !mac) return;
+    const op = { kind: "put", name, mac: structuredClone(mac), old: old && old !== name ? old : null, unobserved: !this.items };
+    const tail = this.pending[this.pending.length - 1];
+    // Only coalesce a not-yet-sent update to the same name, preserving a rename.
+    if (!op.old && tail?.kind === "put" && tail.name === name && tail !== this.active) {
+      tail.mac = op.mac;
+      if (this.items) this.apply(this.items, op);
+    } else {
+      if (this.items) this.prepare(this.items, op);
+      this.pending.push(op);
+    }
+    this.revision++;
+    if (!this.items && !this.loading && !this.loadError && !destructiveOperation && !closeBusy()) this.ensure();
+    this.schedule();
+    this.notify();
   },
   remove(name) {
-    if (this.items) delete this.items[name];
-    invoke("delete_library_macro", { name }).catch(() => {});
+    if (!name) return;
+    const op = { kind: "delete", name, unobserved: !this.items };
+    if (this.items) this.prepare(this.items, op);
+    this.pending.push(op);
+    this.revision++;
+    if (!this.items && !this.loading && !this.loadError && !destructiveOperation && !closeBusy()) this.ensure();
+    this.schedule(0);
+    this.notify();
+  },
+  hasWork() { return !!(this.pending.length || this.job || this.loading); },
+  flush() {
+    clearTimeout(this.timer);
+    this.timer = null;
+    if (this.job) return this.job;
+    if (this.blocked) return Promise.resolve(false);
+    if (!this.pending.length && !this.loading) return Promise.resolve(true);
+    let job;
+    job = (async () => {
+      if (!this.items) {
+        const loaded = await this.ensure(true);
+        if (!loaded) return !this.pending.length;
+      }
+      if (this.blocked) return false;
+      while (this.pending.length) {
+        const op = this.pending[0];
+        this.active = op;
+        try {
+          if (op.kind === "put") await invoke("save_library_macro", { name: op.name, mac: op.mac, old: op.old, expected: op.expected, expectedOld: op.expectedOld });
+          else await invoke("delete_library_macro", { name: op.name, expected: op.expected });
+        } catch (e) {
+          this.error = String(e);
+          this.notify();
+          toast(t("Bibliothèque de macros non enregistrée : {e}", { e }), true);
+          return false;
+        } finally { this.active = null; }
+        if (this.pending[0] !== op) {
+          this.error = "MACRO_QUEUE_CHANGED";
+          this.notify();
+          return false;
+        }
+        this.pending.shift();
+        this.error = null;
+        this.notify();
+      }
+      clearTimeout(this.timer);
+      this.timer = null;
+      return true;
+    })().finally(() => { if (this.job === job) { this.job = null; this.notify(); } });
+    this.job = job;
+    this.notify();
+    return job;
+  },
+  /** A replacement may have changed the library after the user's last view. */
+  configReplaced() {
+    clearTimeout(this.timer);
+    this.timer = null;
+    this.generation++;
+    if (this.pending.length) {
+      this.blocked = true;
+      this.error = "MACRO_CONFIG_REPLACED";
+    } else {
+      this.items = null;
+      this.loadError = null;
+    }
+    this.notify();
+  },
+  discardPending() {
+    if (this.job || this.loading || !this.pending.length) return false;
+    clearTimeout(this.timer);
+    this.timer = null;
+    this.pending = [];
+    this.items = null;
+    this.error = null;
+    this.loadError = null;
+    this.blocked = false;
+    this.revision++;
+    this.notify();
+    return true;
+  },
+  /** Safely copy a currently visible library item without replacing a profile item. */
+  copyInto(name, target) {
+    if (!target || typeof target !== "object" || Array.isArray(target) ||
+        Object.hasOwn(target, name) || !this.items || !Object.hasOwn(this.items, name)) return false;
+    // Assignment to "__proto__" on a regular object would mutate its prototype.
+    Object.defineProperty(target, name, { value: structuredClone(this.items[name]), enumerable: true, writable: true, configurable: true });
+    return true;
   },
   /** Library macros that `profileMacros` does not have yet. */
   others(profileMacros) {
-    return Object.keys(this.items || {}).filter((n) => !(profileMacros || {})[n]);
+    return Object.keys(this.items || {}).filter((n) => !Object.hasOwn(profileMacros || {}, n));
   },
 };
 
@@ -44,18 +212,33 @@ class MacroEditor {
     this.sel = null;
     this.recording = false;
     o.list.addEventListener("click", async (e) => {
-      if (e.target.closest("[data-act=add]")) { this.add(); this.render(); this.changed(t("Macro créée")); return; }
+      if (e.target.closest("[data-act=add]")) { if (this.add()) { this.render(); this.changed(t("Macro créée")); } return; }
       const lib = e.target.closest(".macro-item.lib");
       if (lib && e.target.closest("[data-act=unlib]")) {
-        const ok = await ask(t("RETIRER « {name} » DE LA BIBLIOTHÈQUE ?", { name: lib.dataset.name }), "", { confirmOnly: true, ok: t("RETIRER") });
-        if (ok) { MacroLib.remove(lib.dataset.name); this.render(); }
+        const name = lib.dataset.name;
+        if (!MacroLib.items || !Object.hasOwn(MacroLib.items, name)) { this.render(); return; }
+        const revision = MacroLib.revision, generation = MacroLib.generation;
+        const seen = structuredClone(MacroLib.items[name]);
+        const ok = await ask(t("RETIRER « {name} » DE LA BIBLIOTHÈQUE ?", { name }), "", { confirmOnly: true, ok: t("RETIRER") });
+        if (!ok) return;
+        if (revision !== MacroLib.revision || generation !== MacroLib.generation || !MacroLib.items ||
+            !Object.hasOwn(MacroLib.items, name) || !profileValueEqual(MacroLib.items[name], seen)) {
+          toast(t("La bibliothèque a changé ; réessayez."), true);
+          this.render();
+          return;
+        }
+        MacroLib.remove(name);
+        this.render();
         return;
       }
       if (lib) {
         // copied into this profile, then edited here
         const all = this.o.get();
-        if (!all) return;
-        all[lib.dataset.name] = structuredClone(MacroLib.items[lib.dataset.name]);
+        if (!MacroLib.copyInto(lib.dataset.name, all)) {
+          toast(t("La macro n'est plus disponible ou existe déjà dans ce profil. Actualisez puis réessayez."), true);
+          this.render();
+          return;
+        }
         this.sel = lib.dataset.name;
         this.render();
         this.o.changed(t("Macro « {name} » ajoutée depuis la bibliothèque", { name: lib.dataset.name }));
@@ -75,6 +258,13 @@ class MacroEditor {
   /** New macro "macro-n", selected; returns its name. */
   add() {
     const all = this.o.get();
+    if (!all) return null;
+    // New names cannot be chosen safely before the shared library is known.
+    if (!MacroLib.items) {
+      MacroLib.ensure();
+      toast(t("Attendez le chargement de la bibliothèque de macros, puis réessayez."), true);
+      return null;
+    }
     let n = 1;
     while (all[`macro-${n}`] || MacroLib.items?.[`macro-${n}`]) n++;
     const name = `macro-${n}`;
@@ -91,7 +281,7 @@ class MacroEditor {
   }
 
   render() {
-    if (!MacroLib.items) MacroLib.ensure().then(() => this.render());
+    if (!MacroLib.items && !MacroLib.loadError) MacroLib.ensure().then((lib) => { if (lib) this.render(); });
     const all = this.macros;
     const names = Object.keys(all);
     if (!this.sel || !all[this.sel]) this.sel = names[0] || null;
@@ -165,7 +355,15 @@ class MacroEditor {
     if (e.target.classList.contains("macro-mode")) { m.mode = e.target.value; this.changed(t("Mode enregistré")); this.render(); return; }
     if (e.target.classList.contains("macro-name")) {
       const nn = e.target.value.trim();
-      if (!nn || (nn !== this.sel && all[nn])) { toast(t("Nom vide ou déjà utilisé"), true); e.target.value = this.sel; return; }
+      if (!MacroLib.items) {
+        MacroLib.ensure();
+        toast(t("Attendez le chargement de la bibliothèque de macros, puis réessayez."), true);
+        e.target.value = this.sel;
+        return;
+      }
+      if (!nn || (nn !== this.sel && (Object.hasOwn(all, nn) || Object.hasOwn(MacroLib.items, nn)))) {
+        toast(t("Nom vide ou déjà utilisé"), true); e.target.value = this.sel; return;
+      }
       // insertion order kept
       const old = this.sel;
       this.o.set(Object.fromEntries(Object.entries(all).map(([k, v]) => [k === old ? nn : k, v])));

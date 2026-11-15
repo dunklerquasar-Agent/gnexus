@@ -4,10 +4,11 @@
 //! The engine picks changes up through its hot reload.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use g13_core::G13Key;
-use g13_daemon::profiles::{FileDto, dto_to_toml, from_dto};
+use g13_daemon::profiles::{FileDto, MatchRule, dto_to_toml, from_dto};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,6 +91,76 @@ fn write(dir: &Path, id: &str, dto: &FileDto) -> Result<(), String> {
     fs::write(file(dir, id)?, text).map_err(|e| e.to_string())
 }
 
+/// Create only; never truncate a path another process created after our scan.
+/// An I/O failure can still leave a partially written new file.
+fn write_new(dir: &Path, id: &str, dto: &FileDto) -> Result<(), String> {
+    let text = dto_to_toml(dto).map_err(|e| e.0)?;
+    let path = file(dir, id)?;
+    let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&path)
+        .map_err(|e| format!("impossible de créer {} sans écraser : {e}", path.display()))?;
+    f.write_all(text.as_bytes()).map_err(|e| format!("PROFILE_CREATE_PARTIAL:{id}: {}: {e}", path.display()))
+}
+
+/// Match the engine's ASCII case-insensitive, optional .exe suffix semantics.
+fn same_executable(a: &str, b: &str) -> bool {
+    fn strip_exe(name: &str) -> &str {
+        match name.len().checked_sub(4) {
+            Some(i) if name.is_char_boundary(i) && name[i..].eq_ignore_ascii_case(".exe") => &name[..i],
+            _ => name,
+        }
+    }
+    strip_exe(a).eq_ignore_ascii_case(strip_exe(b))
+}
+
+/// Distinct title substrings may occur in one title. A title-only rule may
+/// overlap any executable. Distinct EXE names are treated as disjoint, as in
+/// the Windows watcher (which has no app_id). On Linux the engine can also
+/// match a different app_id; this deliberately remains an identified gap.
+fn could_overlap(a: &MatchRule, b: &MatchRule) -> bool {
+    if (a.exe.is_none() && a.title.is_none()) || (b.exe.is_none() && b.title.is_none()) { return false; }
+    match (a.exe.as_deref(), b.exe.as_deref()) {
+        (Some(x), Some(y)) => same_executable(x, y),
+        _ => true,
+    }
+}
+
+/// Unlike the display list, ownership checks fail closed on unreadable,
+/// unsupported or symlinked profile entries; otherwise an owner could be missed.
+fn checked_assignment_ids(dir: &Path) -> Result<Vec<String>, String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("dossier de profils illisible : {e}"))?;
+    let mut found = Vec::new();
+    for entry in entries {
+        let path = entry.map_err(|e| format!("entrée de profil illisible : {e}"))?.path();
+        if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("toml")) { continue; }
+        let stem = path.file_stem().and_then(|s| s.to_str()).ok_or("nom de fichier de profil non valide")?.to_string();
+        let expected_path = file(dir, &stem)?;
+        let kind = fs::symlink_metadata(&path).map_err(|e| format!("profil {stem} illisible : {e}"))?.file_type();
+        if !kind.is_file() || (cfg!(not(windows)) && path != expected_path) {
+            return Err(format!("fichier de profil non pris en charge : {}", path.display()));
+        }
+        found.push(stem);
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// Refuse newly introduced overlaps, but leave pre-existing overlaps and
+/// unrelated edits alone. This conservative first version offers no override;
+/// external writers are outside the GUI mutex and can still race this check.
+pub fn check_new_rule_claims(dir: &Path, exclude: Option<&str>, added: &[MatchRule]) -> Result<(), String> {
+    if added.is_empty() { return Ok(()); }
+    let ids = checked_assignment_ids(dir).map_err(|e| format!("RULE_OWNERS_UNAVAILABLE: {e}"))?;
+    for other in ids {
+        if exclude == Some(other.as_str()) { continue; }
+        let dto = load(dir, &other).map_err(|e| format!("RULE_OWNERS_UNAVAILABLE: {other}: {e}"))?;
+        from_dto(dto.clone()).map_err(|e| format!("RULE_OWNERS_UNAVAILABLE: {other}: {}", e.0))?;
+        if added.iter().any(|draft| dto.rules.iter().any(|r| could_overlap(draft, r))) {
+            return Err(format!("RULE_OWNER_CONFLICT:{other}"));
+        }
+    }
+    Ok(())
+}
+
 /// Validate and write. Marking a profile as default clears the flag elsewhere.
 pub fn save(dir: &Path, id: &str, dto: &FileDto) -> Result<(), String> {
     from_dto(dto.clone()).map_err(|e| e.0)?;
@@ -133,8 +204,12 @@ pub fn create(dir: &Path, name: &str, from: Option<&str>) -> Result<String, Stri
 /// derived from its name). Returns the id.
 pub fn create_from(dir: &Path, mut dto: FileDto) -> Result<String, String> {
     from_dto(dto.clone()).map_err(|e| e.0)?;
+    // Check before any write or automatic numbering: on conflict the selected
+    // LGS file and every existing profile remain untouched.
+    check_new_rule_claims(dir, None, &dto.rules)?;
     dto.default = false;
-    dto.number = Some(list(dir).iter().filter(|p| p.number != u32::MAX).map(|p| p.number).max().unwrap_or(0) + 1);
+    let max_number = ids(dir).into_iter().filter_map(|id| load(dir, &id).ok()?.number).max().unwrap_or(0);
+    dto.number = Some(max_number.checked_add(1).ok_or("numéro de profil épuisé")?);
 
     let base: String = dto
         .name
@@ -159,33 +234,31 @@ pub fn create_from(dir: &Path, mut dto: FileDto) -> Result<String, String> {
     let existing = ids(dir);
     let id = (1..)
         .map(|n| if n == 1 { base.clone() } else { format!("{base}-{n}") })
-        .find(|c| !existing.contains(c))
+        .find(|c| !existing.iter().any(|old| old.eq_ignore_ascii_case(c)))
         .expect("unbounded range");
-    write(dir, &id, &dto)?;
+    write_new(dir, &id, &dto)?;
     Ok(id)
 }
 
-/// Make profile `id` the one for executable `exe`: add the rule to it and
-/// remove the same exe from every other profile (one game, one profile).
+/// Associate a simple executable with this profile without deleting or
+/// widening any other rule. Overlaps require manual resolution; no automatic
+/// cross-file move or unreviewed EXE+title change occurs.
 pub fn assign_app(dir: &Path, id: &str, exe: &str) -> Result<(), String> {
     let exe = exe.trim();
-    if exe.is_empty() {
-        return Err("aucune application".into());
+    if exe.is_empty() { return Err("aucune application".into()); }
+    let mut target = load(dir, id).map_err(|e| format!("profil cible {id} illisible : {e}"))?;
+    from_dto(target.clone()).map_err(|e| format!("profil cible {id} invalide : {}", e.0))?;
+    let same = |r: &MatchRule| r.exe.as_deref().is_some_and(|s| same_executable(s, exe));
+    if target.rules.iter().any(|r| same(r) && r.title.is_some()) {
+        return Err(format!("COMBINED_RULE_CONFLICT:{id}"));
     }
-    let same = |r: &g13_daemon::profiles::MatchRule| r.exe.as_deref().is_some_and(|e| e.eq_ignore_ascii_case(exe));
-    for other in ids(dir).into_iter().filter(|o| o != id) {
-        if let Ok(mut dto) = load(dir, &other)
-            && dto.rules.iter().any(same)
-        {
-            dto.rules.retain(|r| !same(r));
-            write(dir, &other, &dto)?;
-        }
-    }
-    let mut dto = load(dir, id)?;
-    if !dto.rules.iter().any(same) {
-        dto.rules.push(g13_daemon::profiles::MatchRule::exe(exe));
-    }
-    save(dir, id, &dto)
+    let desired = MatchRule::exe(exe);
+    check_new_rule_claims(dir, Some(id), std::slice::from_ref(&desired))?;
+    if target.rules.iter().any(same) { return Ok(()); }
+    target.rules.push(desired);
+    from_dto(target.clone()).map_err(|e| format!("profil cible {id} invalide : {}", e.0))?;
+    // Do not touch any unrelated profile or default flag.
+    write(dir, id, &target)
 }
 
 pub fn delete(dir: &Path, id: &str) -> Result<(), String> {

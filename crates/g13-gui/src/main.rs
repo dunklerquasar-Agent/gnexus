@@ -13,14 +13,22 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod backup;
+mod close_guard;
 mod conflicts;
 mod i18n;
 mod library;
+mod profile_delta;
+mod profile_edits;
 mod profiles_io;
 mod settings;
+#[cfg(test)]
+mod library_safety_tests;
+#[cfg(test)]
+mod profile_safety_tests;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use g13_daemon::engine::UiEvent;
 use g13_daemon::headset::{HeadsetCommand, HeadsetStatus};
@@ -84,6 +92,8 @@ enum Ev {
 struct AppState {
     runtime: Mutex<Option<Runtime>>,
     profiles_dir: Option<PathBuf>,
+    /// Serializes GUI profile, macro-library and backup operations; tracks profile incarnations.
+    profile_edits: Mutex<profile_edits::ProfileEdits>,
     status: Arc<Mutex<Status>>,
     settings: Mutex<Settings>,
     settings_path: Option<PathBuf>,
@@ -93,6 +103,12 @@ struct AppState {
     recorder: Mutex<Option<Box<dyn g13_daemon::platform::InputRecorder>>>,
     /// What the overlay shows once its page has loaded (it is created when called).
     overlay_pending: Mutex<Option<OverlayOpen>>,
+    /// Native close and process shutdown wait for the frontend save queues.
+    close_guard: Mutex<close_guard::CloseGuard>,
+    main_opening: AtomicBool,
+    overlay_opening: AtomicBool,
+    quit_deferred: AtomicBool,
+    restart_pending: AtomicBool,
 }
 
 impl AppState {
@@ -332,7 +348,8 @@ fn enable_mouse_profile(state: State<AppState>, sector: u16, enabled: bool) -> R
 /// The macro library (every macro of the G13 and the mouse, to reuse anywhere).
 #[tauri::command]
 fn macro_library(state: State<AppState>) -> Result<library::Library, String> {
-    Ok(library::load(state.dir()?))
+    let _guard = state.profile_edits.lock().unwrap();
+    library::load(state.dir()?)
 }
 
 /// Put a macro in the library (`old`: its previous name, after a rename).
@@ -342,23 +359,18 @@ fn save_library_macro(
     name: String,
     mac: g13_daemon::profiles::format::MacroDto,
     old: Option<String>,
+    expected: Option<g13_daemon::profiles::format::MacroDto>,
+    expected_old: Option<g13_daemon::profiles::format::MacroDto>,
 ) -> Result<(), String> {
-    let dir = state.dir()?;
-    let mut lib = library::load(dir);
-    if let Some(old) = old.filter(|o| *o != name) {
-        lib.remove(&old);
-    }
-    lib.insert(name, mac);
-    library::save(dir, &lib)
+    let _guard = state.profile_edits.lock().unwrap();
+    library::put_if_unchanged(state.dir()?, name, mac, old, expected, expected_old)
 }
 
 /// Take a macro out of the library (the profiles that use it keep their copy).
 #[tauri::command]
-fn delete_library_macro(state: State<AppState>, name: String) -> Result<(), String> {
-    let dir = state.dir()?;
-    let mut lib = library::load(dir);
-    lib.remove(&name);
-    library::save(dir, &lib)
+fn delete_library_macro(state: State<AppState>, name: String, expected: Option<g13_daemon::profiles::format::MacroDto>) -> Result<(), String> {
+    let _guard = state.profile_edits.lock().unwrap();
+    library::remove_if_unchanged(state.dir()?, &name, expected)
 }
 
 /// G Nexus mouse profile used where no application has its own.
@@ -438,31 +450,56 @@ fn revert_mouse(state: State<AppState>) -> Result<(), String> {
 
 #[tauri::command]
 fn list_profiles(state: State<AppState>) -> Result<Vec<profiles_io::ProfileSummary>, String> {
+    // list() may assign profile numbers, so it must take the write lock too.
+    let _edits = state.profile_edits.lock().unwrap();
     Ok(profiles_io::list(state.dir()?))
 }
 
 #[tauri::command]
 fn load_profile(state: State<AppState>, id: String) -> Result<FileDto, String> {
+    let _edits = state.profile_edits.lock().unwrap();
     profiles_io::load(state.dir()?, &id)
 }
 
 #[tauri::command]
-fn save_profile(state: State<AppState>, id: String, profile: FileDto) -> Result<(), String> {
-    profiles_io::save(state.dir()?, &id, &profile)?;
+fn load_profile_edit(state: State<AppState>, id: String) -> Result<profile_edits::EditSnapshot, String> {
+    state.profile_edits.lock().unwrap().load(state.dir()?, &id)
+}
+
+#[tauri::command]
+fn save_profile(state: State<AppState>, id: String, base: FileDto, profile: FileDto, token: String) -> Result<profile_edits::EditSnapshot, String> {
+    let result = {
+        let edits = state.profile_edits.lock().unwrap();
+        edits.save(state.dir()?, &id, &base, &profile, &token)
+    };
+    // Even a failed filesystem write can have changed a profile or default.
     state.rescan();
-    Ok(())
+    Ok(profile_edits::EditSnapshot { profile: result?, token })
 }
 
 #[tauri::command]
 fn create_profile(state: State<AppState>, name: String, from: Option<String>) -> Result<String, String> {
-    let id = profiles_io::create(state.dir()?, &name, from.as_deref())?;
+    let result = {
+        let mut edits = state.profile_edits.lock().unwrap();
+        match profiles_io::create(state.dir()?, &name, from.as_deref()) {
+            Ok(id) => { edits.invalidate(&id); Ok(id) }
+            Err(e) => { if e.contains("PROFILE_CREATE_PARTIAL:") { edits.invalidate_all(); } Err(e) }
+        }
+    };
     state.rescan();
-    Ok(id)
+    result
 }
 
 #[tauri::command]
-fn delete_profile(state: State<AppState>, id: String) -> Result<(), String> {
-    profiles_io::delete(state.dir()?, &id)?;
+fn delete_profile(app: AppHandle, state: State<AppState>, id: String, expected: FileDto, token: String) -> Result<(), String> {
+    {
+        let mut edits = state.profile_edits.lock().unwrap();
+        // Another window's unsaved edits cannot be compared with the file.
+        if state.overlay_opening.load(Ordering::SeqCst) || app.get_webview_window("overlay").is_some() {
+            return Err("PROFILE_DELETE_OVERLAY_OPEN: fermez l'overlay avant la suppression".into());
+        }
+        edits.delete(state.dir()?, &id, &expected, &token)?;
+    }
     state.rescan();
     Ok(())
 }
@@ -538,6 +575,7 @@ fn set_settings(
 #[tauri::command]
 fn backup_now(app: AppHandle, state: State<AppState>) -> Result<Option<String>, String> {
     let settings = state.settings.lock().unwrap().clone();
+    let _edits = state.profile_edits.lock().unwrap();
     backup::auto_backup(state.dir()?, &settings, app.autolaunch().is_enabled().unwrap_or(false), true)?;
     Ok(backup::last_auto(state.dir()?))
 }
@@ -550,6 +588,7 @@ fn spawn_auto_backup(app: AppHandle) {
             let state = app.state::<AppState>();
             if let Ok(dir) = state.dir() {
                 let settings = state.settings.lock().unwrap().clone();
+                let _edits = state.profile_edits.lock().unwrap();
                 match backup::auto_backup(dir, &settings, app.autolaunch().is_enabled().unwrap_or(false), false) {
                     Ok(Some(p)) => log::info!("scheduled backup: {}", p.display()),
                     Ok(None) => {}
@@ -633,7 +672,11 @@ fn safety_backup(app: &AppHandle, state: &AppState, label: &str) -> Result<(), S
 /// Every profile + the preferences in one file. Returns the file written (`None` = cancelled).
 #[tauri::command]
 async fn export_config(app: AppHandle, state: State<'_, AppState>) -> Result<Option<String>, String> {
-    let b = backup::collect(state.dir()?, &state.settings.lock().unwrap().clone(), app.autolaunch().is_enabled().unwrap_or(false))?;
+    let settings = state.settings.lock().unwrap().clone();
+    let b = {
+        let _edits = state.profile_edits.lock().unwrap();
+        backup::collect(state.dir()?, &settings, app.autolaunch().is_enabled().unwrap_or(false))?
+    };
     let Some(file) = app
         .dialog()
         .file()
@@ -664,11 +707,20 @@ async fn import_config(app: AppHandle, state: State<'_, AppState>) -> Result<Opt
     let path = file.into_path().map_err(|e| e.to_string())?;
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let b = backup::parse(&text)?;
-    safety_backup(&app, &state, "avant-import")?;
-    backup::restore_profiles(state.dir()?, &b)?;
-    backup::restore_files(state.dir()?, &b)?;
-    apply_settings(&app, &state, b.settings.clone(), Some(b.autostart))?;
-    state.rescan();
+    let restored = {
+        let mut edits = state.profile_edits.lock().unwrap();
+        profile_edits::allow_config_replacement(state.overlay_opening.load(Ordering::SeqCst), app.get_webview_window("overlay").is_some())?;
+        safety_backup(&app, &state, "avant-import")?;
+        edits.invalidate_all(); // before the first potentially partial mutation
+        (|| -> Result<(), String> {
+            backup::restore_profiles(state.dir()?, &b)?;
+            backup::restore_files(state.dir()?, &b)?;
+            apply_settings(&app, &state, b.settings.clone(), Some(b.autostart))?;
+            Ok(())
+        })()
+    };
+    state.rescan(); // also rescan on partial failure
+    restored.map_err(|e| format!("CONFIG_MAY_BE_PARTIAL: {e}"))?;
     log::info!("configuration imported from {} ({} profiles)", path.display(), b.profiles.len());
     Ok(Some(b.profiles.len()))
 }
@@ -677,14 +729,22 @@ async fn import_config(app: AppHandle, state: State<'_, AppState>) -> Result<Opt
 /// ("start with Windows" is left as it is). A backup is saved first.
 #[tauri::command]
 fn reset_config(app: AppHandle, state: State<AppState>) -> Result<(), String> {
-    safety_backup(&app, &state, "avant-reinitialisation")?;
-    backup::reset_profiles(state.dir()?)?;
-    let language = state.settings.lock().unwrap().language.clone();
-    // the language just chosen stays: resetting should not switch the UI language under the user
-    apply_settings(&app, &state, Settings { language, ..Settings::default() }, None)?;
+    let reset = {
+        let mut edits = state.profile_edits.lock().unwrap();
+        profile_edits::allow_config_replacement(state.overlay_opening.load(Ordering::SeqCst), app.get_webview_window("overlay").is_some())?;
+        safety_backup(&app, &state, "avant-reinitialisation")?;
+        edits.invalidate_all();
+        (|| -> Result<(), String> {
+            backup::reset_profiles(state.dir()?)?;
+            let language = state.settings.lock().unwrap().language.clone();
+            apply_settings(&app, &state, Settings { language, ..Settings::default() }, None)?;
+            Ok(())
+        })()
+    };
     state.request(Request::Pin(None));
     state.status.lock().unwrap().pinned = None;
     state.rescan();
+    reset.map_err(|e| format!("CONFIG_MAY_BE_PARTIAL: {e}"))?;
     log::info!("configuration reset");
     Ok(())
 }
@@ -817,22 +877,41 @@ async fn pick_exe(app: AppHandle, state: State<'_, AppState>) -> Result<Option<S
 
 /// Overlay: make profile `id` the one used by `exe` (the game).
 #[tauri::command]
-fn assign_game(state: State<AppState>, id: String, exe: String) -> Result<(), String> {
-    profiles_io::assign_app(state.dir()?, &id, &exe)?;
-    state.rescan();
-    Ok(())
+fn assign_game(state: State<AppState>, id: String, exe: String, token: String) -> Result<(), String> {
+    let result = {
+        let edits = state.profile_edits.lock().unwrap();
+        edits.require(&id, &token)?;
+        profiles_io::assign_app(state.dir()?, &id, &exe)
+    };
+    state.rescan(); // a failed single-file write may still be partial
+    result
 }
 
 /// Show the overlay on the profile / menu active on the G13 (the game's), or
 /// hide it if already shown. Triggered by the overlay G-key.
 fn toggle_overlay(app: &AppHandle) {
-    let existing = app.get_webview_window("overlay");
+    // A destructive configuration replacement and opening a second editor
+    // must not start at the same time.
+    let state = app.state::<AppState>();
+    let existing = {
+        let _guard = state.profile_edits.lock().unwrap();
+        let guard = state.close_guard.lock().unwrap();
+        if guard.quitting() || guard.closing("overlay") || state.quit_deferred.load(Ordering::SeqCst)
+            || state.overlay_opening.load(Ordering::SeqCst)
+        {
+            return;
+        }
+        let existing = app.get_webview_window("overlay");
+        if existing.is_none() {
+            state.overlay_opening.store(true, Ordering::SeqCst);
+        }
+        existing
+    };
     log::info!("overlay toggle (open: {})", existing.is_some());
     if existing.is_some() {
-        hide_overlay(app);
+        request_window_close(app, "overlay");
         return;
     }
-    let state = app.state::<AppState>();
     let open = {
         let s = state.status.lock().unwrap();
         OverlayOpen { profile: s.active_profile.clone(), bank: s.bank.clone(), game: None }
@@ -867,7 +946,11 @@ fn toggle_overlay(app: &AppHandle) {
         .inner_size(OVERLAY_W, 860.0)
         .visible(false)
         .build();
+    window_creation_finished(app, "overlay");
     if let Err(e) = built {
+        *state.overlay_pending.lock().unwrap() = None;
+        state.request(Request::Preview(None));
+        let _ = app.emit_to("main", "overlay-closed", ());
         log::warn!("overlay window: {e}");
     }
 }
@@ -915,18 +998,159 @@ fn place_overlay(app: &AppHandle, w: &tauri::WebviewWindow, position: &str) {
     let _ = w.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
 }
 
-/// Close the overlay (its web view is freed); Windows gives the focus back to the game underneath.
-fn hide_overlay(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("overlay") {
-        let _ = w.destroy();
+/// A page has installed its close listener; before this it cannot hold edits.
+#[tauri::command]
+fn window_ready(window: tauri::WebviewWindow, state: State<AppState>) -> bool {
+    let mut guard = state.close_guard.lock().unwrap();
+    // Do not enable editing in a page that finishes loading while shutdown or
+    // its already-approved close is in progress.
+    if guard.quitting() || guard.closing(window.label()) || state.quit_deferred.load(Ordering::SeqCst) {
+        return false;
     }
-    // the main window re-sends its own preview and reloads what the overlay edited
-    let _ = app.emit_to("main", "overlay-closed", ());
+    guard.ready(window.label());
+    true
+}
+
+/// Ask Tauri to close the already-flushed window normally. Unlike destroy(),
+/// this produces the last-window exit behavior (including the tray setting).
+fn close_window_now(app: &AppHandle, label: &str) -> bool {
+    let state = app.state::<AppState>();
+    let w = {
+        let _guard = state.profile_edits.lock().unwrap();
+        let Some(w) = app.get_webview_window(label) else {
+            state.close_guard.lock().unwrap().destroyed(label);
+            return false;
+        };
+        state.close_guard.lock().unwrap().approve_close(label);
+        w
+    };
+    if let Err(e) = w.close() {
+        state.close_guard.lock().unwrap().cancel_close(label);
+        log::warn!("cannot close {label} after saving: {e}");
+        return false;
+    }
+    if label == "overlay" {
+        // The main window re-sends its preview and reloads the overlay's edits.
+        let _ = app.emit_to("main", "overlay-closed", ());
+    }
+    true
+}
+
+fn dispatch_close_request(app: &AppHandle, label: &str, token: u64) {
+    if let Err(e) = app.emit_to(label, "flush-before-close", token) {
+        log::warn!("cannot ask {label} to flush before closing: {e}");
+        let state = app.state::<AppState>();
+        let result = {
+            let mut guard = state.close_guard.lock().unwrap();
+            let result = guard.complete(label, token, false);
+            if matches!(result, close_guard::Completion::Cancelled { notify_all: true }) {
+                state.restart_pending.store(false, Ordering::SeqCst);
+            }
+            result
+        };
+        if matches!(result, close_guard::Completion::Cancelled { notify_all: true }) {
+            let _ = app.emit("flush-close-cancelled", ());
+        }
+    }
+}
+
+fn request_window_close(app: &AppHandle, label: &str) {
+    let state = app.state::<AppState>();
+    let plan = state.close_guard.lock().unwrap().request_window(label);
+    match plan {
+        close_guard::ClosePlan::Flush(token) => dispatch_close_request(app, label, token),
+        close_guard::ClosePlan::Immediate => { close_window_now(app, label); },
+        close_guard::ClosePlan::AlreadyPending => {}
+    }
+}
+
+/// If quit was requested while a window was being built, retry it after all
+/// creations have completed. No application lock is held across `.build()`.
+fn window_creation_finished(app: &AppHandle, label: &str) {
+    let state = app.state::<AppState>();
+    let resume_quit = {
+        let _guard = state.profile_edits.lock().unwrap();
+        if label == "main" { state.main_opening.store(false, Ordering::SeqCst); }
+        if label == "overlay" { state.overlay_opening.store(false, Ordering::SeqCst); }
+        state.quit_deferred.load(Ordering::SeqCst)
+            && !state.main_opening.load(Ordering::SeqCst)
+            && !state.overlay_opening.load(Ordering::SeqCst)
+    };
+    if resume_quit { request_shutdown(app, false); }
+}
+
+/// Finish only after both editors flushed. Unlike `restart()`, request_restart
+/// returns and lets Tauri deliver its exit event (where the engine stops).
+fn finish_shutdown(app: &AppHandle) {
+    let restart = {
+        let state = app.state::<AppState>();
+        // Serialize consuming the restart intent with a simultaneous new
+        // request/cancellation; never hold an application lock across Tauri.
+        let _guard = state.close_guard.lock().unwrap();
+        state.restart_pending.swap(false, Ordering::SeqCst)
+    };
+    if restart { app.request_restart(); } else { app.exit(0); }
+}
+
+/// Tray quit or restart waits for both open editors. A failed save cancels it.
+fn request_shutdown(app: &AppHandle, restart: bool) {
+    let state = app.state::<AppState>();
+    // Serialize the snapshot of open windows with creation and config changes.
+    // Do not hold this lock while dispatching events or building windows.
+    let plan = {
+        let _guard = state.profile_edits.lock().unwrap();
+        if state.main_opening.load(Ordering::SeqCst) || state.overlay_opening.load(Ordering::SeqCst) {
+            if restart { state.restart_pending.store(true, Ordering::SeqCst); }
+            state.quit_deferred.store(true, Ordering::SeqCst);
+            None
+        } else {
+            state.quit_deferred.store(false, Ordering::SeqCst);
+            let open: Vec<&str> = ["main", "overlay"].into_iter().filter(|label| app.get_webview_window(label).is_some()).collect();
+            let mut guard = state.close_guard.lock().unwrap();
+            if restart { state.restart_pending.store(true, Ordering::SeqCst); }
+            guard.request_quit(&open)
+        }
+    };
+    if let Some((requests, exit_now)) = plan {
+        for (label, token) in requests {
+            dispatch_close_request(app, &label, token);
+        }
+        if exit_now {
+            finish_shutdown(app);
+        }
+    }
+}
+
+/// The frontend sends this only after it has finished (or failed) its queue.
+/// `true` keeps the page inert while an approved close or tray quit completes.
+#[tauri::command]
+fn finish_window_close(app: AppHandle, window: tauri::WebviewWindow, state: State<AppState>, token: u64, saved: bool) -> bool {
+    let label = window.label();
+    let completion = {
+        let mut guard = state.close_guard.lock().unwrap();
+        let completion = guard.complete(label, token, saved);
+        if matches!(completion, close_guard::Completion::Cancelled { notify_all: true }) {
+            state.restart_pending.store(false, Ordering::SeqCst);
+        }
+        completion
+    };
+    match completion {
+        // Stay inert until the approved native close arrives; if dispatch fails,
+        // the window remains editable so the user can retry.
+        close_guard::Completion::CloseWindow => close_window_now(&app, label),
+        close_guard::Completion::HoldForQuit => true,
+        close_guard::Completion::Exit => { finish_shutdown(&app); true }
+        close_guard::Completion::Cancelled { notify_all } => {
+            if notify_all { let _ = app.emit("flush-close-cancelled", ()); }
+            false
+        }
+        close_guard::Completion::Ignore => false,
+    }
 }
 
 #[tauri::command]
 fn close_overlay(app: AppHandle) {
-    hide_overlay(&app);
+    request_window_close(&app, "overlay");
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -953,8 +1177,15 @@ async fn import_lgs(app: AppHandle, state: State<'_, AppState>) -> Result<Option
     let path = file.into_path().map_err(|e| e.to_string())?;
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let imported = g13_daemon::profiles::lgs::import(text.trim_start_matches('\u{feff}')).map_err(|e| e.0)?;
-    let id = profiles_io::create_from(state.dir()?, imported.dto.clone())?;
+    let result = {
+        let mut edits = state.profile_edits.lock().unwrap();
+        match profiles_io::create_from(state.dir()?, imported.dto.clone()) {
+            Ok(id) => { edits.invalidate(&id); Ok(id) }
+            Err(e) => { if e.contains("PROFILE_CREATE_PARTIAL:") { edits.invalidate_all(); } Err(e) }
+        }
+    };
     state.rescan();
+    let id = result?;
     log::info!("imported LGS profile {} as '{id}' ({} skipped)", path.display(), imported.skipped.len());
     Ok(Some(ImportResult { id, name: imported.dto.name, skipped: imported.skipped }))
 }
@@ -963,7 +1194,10 @@ async fn import_lgs(app: AppHandle, state: State<'_, AppState>) -> Result<Option
 /// bindings LGS cannot hold (`None` if the dialog was cancelled).
 #[tauri::command]
 async fn export_lgs(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Option<Vec<String>>, String> {
-    let dto = profiles_io::load(state.dir()?, &id)?;
+    let dto = {
+        let _edits = state.profile_edits.lock().unwrap();
+        profiles_io::load(state.dir()?, &id)?
+    };
     let (xml, skipped) = g13_daemon::profiles::lgs::export(&dto);
     let Some(file) = app
         .dialog()
@@ -1080,7 +1314,7 @@ async fn install_device_access(record: bool) -> Result<bool, String> {
 /// Restart G Nexus (after the device access was granted).
 #[tauri::command]
 fn restart_app(app: AppHandle) {
-    app.restart();
+    request_shutdown(&app, true);
 }
 
 /// Every key name the engine accepts (the front-end checks its catalogue against it).
@@ -1119,11 +1353,29 @@ fn open_profiles_dir(app: AppHandle, state: State<AppState>) -> Result<(), Strin
 
 /// Show the main window, creating it if it was closed (to the tray, its web view is freed).
 fn show_main(app: &AppHandle) {
-    let w = match app.get_webview_window("main") {
+    let state = app.state::<AppState>();
+    let existing = {
+        let _guard = state.profile_edits.lock().unwrap();
+        let guard = state.close_guard.lock().unwrap();
+        if guard.quitting() || guard.closing("main") || state.quit_deferred.load(Ordering::SeqCst)
+            || state.main_opening.load(Ordering::SeqCst)
+        {
+            return;
+        }
+        let existing = app.get_webview_window("main");
+        if existing.is_none() { state.main_opening.store(true, Ordering::SeqCst); }
+        existing
+    };
+    let w = match existing {
         Some(w) => w,
         None => {
-            let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main") else { return };
-            match tauri::WebviewWindowBuilder::from_config(app, config).and_then(|b| b.build()) {
+            let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main") else {
+                window_creation_finished(app, "main");
+                return;
+            };
+            let built = tauri::WebviewWindowBuilder::from_config(app, config).and_then(|b| b.build());
+            window_creation_finished(app, "main");
+            match built {
                 Ok(w) => w,
                 Err(e) => {
                     log::warn!("main window: {e}");
@@ -1371,12 +1623,18 @@ fn main() {
     let state = AppState {
         runtime: Mutex::new(runtime),
         profiles_dir,
+        profile_edits: Mutex::new(profile_edits::ProfileEdits::default()),
         status: status.clone(),
         settings: Mutex::new(settings),
         settings_path,
         ui_lang: Mutex::new("fr".into()),
         recorder: Mutex::new(None),
         overlay_pending: Mutex::new(None),
+        close_guard: Mutex::new(close_guard::CloseGuard::default()),
+        main_opening: AtomicBool::new(false),
+        overlay_opening: AtomicBool::new(false),
+        quit_deferred: AtomicBool::new(false),
+        restart_pending: AtomicBool::new(false),
     };
 
     let app = tauri::Builder::default()
@@ -1387,10 +1645,24 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
+        .on_page_load(|webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Started {
+                let app = webview.app_handle();
+                let state = app.state::<AppState>();
+                let cancelled = {
+                    let mut guard = state.close_guard.lock().unwrap();
+                    let cancelled = guard.unready(webview.label());
+                    if cancelled { state.restart_pending.store(false, Ordering::SeqCst); }
+                    cancelled
+                };
+                if cancelled { let _ = app.emit("flush-close-cancelled", ()); }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_status,
             list_profiles,
             load_profile,
+            load_profile_edit,
             save_profile,
             create_profile,
             delete_profile,
@@ -1409,6 +1681,8 @@ fn main() {
             import_lgs,
             export_lgs,
             close_overlay,
+            window_ready,
+            finish_window_close,
             overlay_ready,
             backup_now,
             assign_game,
@@ -1478,7 +1752,7 @@ fn main() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, e| match e.id.as_ref() {
                     "open" => show_main(app),
-                    "quit" => app.exit(0),
+                    "quit" => request_shutdown(app, false),
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, e| {
@@ -1502,7 +1776,7 @@ fn main() {
             #[cfg(unix)]
             {
                 let handle = app.handle().clone();
-                if let Err(e) = ctrlc::set_handler(move || handle.exit(0)) {
+                if let Err(e) = ctrlc::set_handler(move || request_shutdown(&handle, false)) {
                     log::warn!("no signal handler: {e}");
                 }
             }
@@ -1516,14 +1790,26 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Alt+F4 on the overlay: closed like G25 / Échap would. The main window
-            // simply closes: its web view goes away, the app stays in the tray (see
-            // ExitRequested) and the tray icon creates it again.
+            // Give each editor a chance to flush its debounced profile/speed
+            // writes before its webview is destroyed (including Alt+F4).
             if let WindowEvent::CloseRequested { api, .. } = event
-                && window.label() == "overlay"
+                && matches!(window.label(), "main" | "overlay")
             {
-                api.prevent_close();
-                hide_overlay(window.app_handle());
+                let approved = window.app_handle().state::<AppState>().close_guard.lock().unwrap().take_approved_close(window.label());
+                if !approved {
+                    api.prevent_close();
+                    request_window_close(window.app_handle(), window.label());
+                }
+            } else if matches!(event, WindowEvent::Destroyed) {
+                let app = window.app_handle();
+                let state = app.state::<AppState>();
+                let cancelled = {
+                    let mut guard = state.close_guard.lock().unwrap();
+                    let cancelled = guard.destroyed(window.label());
+                    if cancelled { state.restart_pending.store(false, Ordering::SeqCst); }
+                    cancelled
+                };
+                if cancelled { let _ = app.emit("flush-close-cancelled", ()); }
             }
         })
         .build(tauri::generate_context!())

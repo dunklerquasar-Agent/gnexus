@@ -6,7 +6,7 @@
   <title>G Nexus</title>
   <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body inert>
   <header class="top">
     <div class="brand">
       <svg viewBox="0 0 24 24" class="brand-hex"><path d="M12 1.5 21.5 7v10L12 22.5 2.5 17V7z"/></svg>
@@ -89,6 +89,16 @@
     <span id="ov-game-text"></span>
     <button class="ghost small hidden" id="ov-assign">ASSOCIER À CE JEU</button>
     <span class="ov-hint" data-i18n-html><b id="ov-key">G25</b> ou <b>Échap</b> : retour au jeu</span>
+  </div>
+
+  <div class="banner hidden" id="profile-save-banner" role="alert">
+    <span id="profile-save-message"></span>
+    <button class="ghost small" id="profile-save-review">VOIR LE BROUILLON</button>
+  </div>
+
+  <div class="banner hidden" id="macro-save-banner" role="alert">
+    <span id="macro-save-message"></span>
+    <button class="ghost small" id="macro-save-review">VOIR LE BROUILLON</button>
   </div>
 
   <div class="banner hidden" id="conflict-banner">
@@ -383,6 +393,13 @@
     </nav>
     <div class="tab-body" id="adv-apps">
       <p class="muted" data-i18n-html>Ce profil s'active tout seul quand l'une de ces applications a le focus. Sinon, le profil par défaut <span class="star">★</span> est utilisé.</p>
+      <section id="profile-draft" class="rule-conflict hidden" role="alert">
+        <strong>BROUILLON NON ENREGISTRÉ</strong>
+        <p>Ce brouillon n'est conservé qu'en mémoire. Copiez le texte avant de l'abandonner ou réessayez après avoir corrigé le problème.</p>
+        <pre id="profile-draft-data"></pre>
+        <button class="ghost small" id="profile-draft-retry">RÉESSAYER</button>
+        <button class="ghost small" id="profile-draft-discard">ABANDONNER LE BROUILLON ET RECHARGER</button>
+      </section>
       <div id="rules"></div>
       <div class="detected">
         <div class="group-cap">Choisir une application détectée <button class="link small-link" id="apps-refresh">actualiser</button></div>
@@ -394,6 +411,13 @@
       <button class="ghost small" id="rule-add">+ SAISIR UN NOM D'EXÉCUTABLE</button>
     </div>
     <div class="tab-body hidden" id="adv-macros">
+      <section id="macro-draft" class="rule-conflict hidden" role="alert">
+        <strong>BIBLIOTHÈQUE DE MACROS : ACTION REQUISE</strong>
+        <p>Les opérations non enregistrées sont uniquement en mémoire. Copiez-les avant de les abandonner.</p>
+        <pre id="macro-draft-data"></pre>
+        <button class="ghost small" id="macro-draft-retry">RÉESSAYER</button>
+        <button class="ghost small" id="macro-draft-discard">ABANDONNER LA FILE DE LA BIBLIOTHÈQUE</button>
+      </section>
       <div class="macro-layout">
         <div class="macro-list" id="macro-list"></div>
         <div class="macro-edit" id="macro-edit"></div>
@@ -575,6 +599,7 @@
   <div class="toast" id="toast"></div>
 
   <!-- outside Tauri (plain browser, UI development): fake back-end -->
+  <script src="profile-delta.js"></script>
   <script>if (!window.__TAURI__) document.write('<script src="dev-mock.js"><\/script>');</script>
   <script src="i18n.js"></script>
   <script src="catalog.js"></script>

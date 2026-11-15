@@ -17,6 +17,73 @@ document.documentElement.classList.add(`os-${OS}`);
 
 // key → [en, de, it, es]
 const TR = {
+  "La bibliothèque a changé ; réessayez.": ["The library changed; try again.", "Die Bibliothek hat sich geändert; versuchen Sie es erneut.", "La libreria è cambiata; riprova.", "La biblioteca ha cambiado; vuelve a intentarlo."],
+  "La macro n'est plus disponible ou existe déjà dans ce profil. Actualisez puis réessayez.": ["The macro is no longer available or already exists in this profile. Refresh and try again.", "Das Makro ist nicht mehr verfügbar oder existiert bereits in diesem Profil. Aktualisieren Sie und versuchen Sie es erneut.", "La macro non è più disponibile o esiste già in questo profilo. Aggiorna e riprova.", "La macro ya no está disponible o ya existe en este perfil. Actualiza y vuelve a intentarlo."],
+  "La bibliothèque n'était pas chargée au début de cette modification. Copiez la file avant de l'abandonner, puis rechargez la bibliothèque.": ["The library had not loaded when this edit began. Copy the queue before discarding it, then reload the library.", "Die Bibliothek war zu Beginn dieser Änderung noch nicht geladen. Kopieren Sie die Warteschlange vor dem Verwerfen und laden Sie die Bibliothek neu.", "La libreria non era caricata all'inizio di questa modifica. Copia la coda prima di scartarla, poi ricarica la libreria.", "La biblioteca no se había cargado al comenzar esta modificación. Copia la cola antes de descartarla y vuelve a cargar la biblioteca."],
+  "Cette macro a changé ailleurs. Copiez la file avant de l'abandonner, puis rechargez la bibliothèque.": ["This macro changed elsewhere. Copy the queue before discarding it, then reload the library.", "Dieses Makro wurde an anderer Stelle geändert. Kopieren Sie die Warteschlange vor dem Verwerfen und laden Sie die Bibliothek neu.", "Questa macro è cambiata altrove. Copia la coda prima di scartarla, poi ricarica la libreria.", "Esta macro cambió en otro lugar. Copia la cola antes de descartarla y vuelve a cargar la biblioteca."],
+  "Ce nom existe déjà dans la bibliothèque ; aucune macro n'a été écrasée.": ["This name already exists in the library; no macro was overwritten.", "Dieser Name existiert bereits in der Bibliothek; kein Makro wurde überschrieben.", "Questo nome esiste già nella libreria; nessuna macro è stata sovrascritta.", "Este nombre ya existe en la biblioteca; no se sobrescribió ninguna macro."],
+  "Chargement de la bibliothèque de macros impossible : {e}": ["Cannot load the macro library: {e}", "Makrobibliothek konnte nicht geladen werden: {e}", "Impossibile caricare la libreria delle macro: {e}", "No se puede cargar la biblioteca de macros: {e}"],
+  "Bibliothèque de macros non enregistrée : {e}": ["Macro library not saved: {e}", "Makrobibliothek nicht gespeichert: {e}", "Libreria delle macro non salvata: {e}", "Biblioteca de macros no guardada: {e}"],
+  "Bibliothèque de macros : {e}": ["Macro library: {e}", "Makrobibliothek: {e}", "Libreria delle macro: {e}", "Biblioteca de macros: {e}"],
+  "Attendez le chargement de la bibliothèque de macros, puis réessayez.": ["Wait for the macro library to load, then retry.", "Warten Sie, bis die Makrobibliothek geladen ist, und versuchen Sie es erneut.", "Attendi il caricamento della libreria delle macro e riprova.", "Espera a que se cargue la biblioteca de macros y vuelve a intentarlo."],
+  "BIBLIOTHÈQUE DE MACROS : ACTION REQUISE": ["MACRO LIBRARY: ACTION REQUIRED", "MAKROBIBLIOTHEK: HANDLUNG ERFORDERLICH", "LIBRERIA MACRO: AZIONE RICHIESTA", "BIBLIOTECA DE MACROS: ACCIÓN NECESARIA"],
+  "Les opérations non enregistrées sont uniquement en mémoire. Copiez-les avant de les abandonner.": ["Unsaved operations exist only in memory. Copy them before discarding them.", "Nicht gespeicherte Vorgänge liegen nur im Arbeitsspeicher. Kopieren Sie sie vor dem Verwerfen.", "Le operazioni non salvate sono solo in memoria. Copiale prima di scartarle.", "Las operaciones no guardadas solo están en memoria. Cópialas antes de descartarlas."],
+  "ABANDONNER LA FILE DE LA BIBLIOTHÈQUE": ["DISCARD LIBRARY QUEUE", "BIBLIOTHEKS-WARTESCHLANGE VERWERFEN", "SCARTA CODA DELLA LIBRERIA", "DESCARTAR COLA DE LA BIBLIOTECA"],
+  "ABANDONNER LA FILE DE LA BIBLIOTHÈQUE ?": ["DISCARD THE LIBRARY QUEUE?", "BIBLIOTHEKS-WARTESCHLANGE VERWERFEN?", "SCARTARE LA CODA DELLA LIBRERIA?", "¿DESCARTAR LA COLA DE LA BIBLIOTECA?"],
+  "La file a changé ; réessayez.": ["The queue changed; try again.", "Die Warteschlange hat sich geändert; versuchen Sie es erneut.", "La coda è cambiata; riprova.", "La cola ha cambiado; vuelve a intentarlo."],
+  "File de la bibliothèque abandonnée ; les copies dans les profils sont conservées.": ["Library queue discarded; copies in profiles are kept.", "Bibliotheks-Warteschlange verworfen; Kopien in Profilen bleiben erhalten.", "Coda della libreria scartata; le copie nei profili sono conservate.", "Cola de la biblioteca descartada; se conservan las copias en los perfiles."],
+  "La bibliothèque a changé pendant l'import : examinez la file locale.": ["The library changed during import: review the local queue.", "Die Bibliothek wurde während des Imports geändert: Prüfen Sie die lokale Warteschlange.", "La libreria è cambiata durante l'importazione: verifica la coda locale.", "La biblioteca cambió durante la importación: revisa la cola local."],
+  "La configuration a changé pendant une modification de la bibliothèque. Copiez la file, puis abandonnez-la avant de recharger.": ["The configuration changed during a library edit. Copy the queue, then discard it before reloading.", "Die Konfiguration wurde während einer Bibliotheksänderung ersetzt. Kopieren Sie die Warteschlange und verwerfen Sie sie vor dem Neuladen.", "La configurazione è cambiata durante una modifica alla libreria. Copia la coda e scartala prima di ricaricare.", "La configuración cambió durante una edición de la biblioteca. Copia la cola y descártala antes de recargar."],
+  "Une règle du profil {id} peut correspondre à la même fenêtre. Modifiez d'abord les associations ; cette modification n'a pas été enregistrée.": [
+    "A rule in profile {id} may match the same window. Change the associations first; this change was not saved.",
+    "Eine Regel in Profil {id} kann dasselbe Fenster betreffen. Ändern Sie zuerst die Zuordnungen; diese Änderung wurde nicht gespeichert.",
+    "Una regola del profilo {id} può corrispondere alla stessa finestra. Modifica prima le associazioni; questa modifica non è stata salvata.",
+    "Una regla del perfil {id} puede coincidir con la misma ventana. Cambia primero las asociaciones; este cambio no se guardó."],
+  "Impossible de vérifier les associations : au moins un profil est illisible ou non pris en charge.": [
+    "Cannot check associations: at least one profile is unreadable or unsupported.",
+    "Zuordnungen nicht prüfbar: Mindestens ein Profil ist unlesbar oder wird nicht unterstützt.",
+    "Impossibile verificare le associazioni: almeno un profilo è illeggibile o non supportato.",
+    "No se pueden comprobar las asociaciones: al menos un perfil no se puede leer o no es compatible."],
+  "Cette règle combine programme et titre. Modifiez-la directement au lieu de l'élargir automatiquement.": [
+    "This rule combines program and title. Edit it directly rather than widening it automatically.",
+    "Diese Regel kombiniert Programm und Titel. Bearbeiten Sie sie direkt, statt sie automatisch zu erweitern.",
+    "Questa regola combina programma e titolo. Modificala direttamente invece di ampliarla automaticamente.",
+    "Esta regla combina programa y título. Edítala directamente en lugar de ampliarla automáticamente."],
+  "Fermez d'abord l'overlay avant de remplacer la configuration.": [
+    "Close the overlay before replacing the configuration.", "Schließen Sie das Overlay, bevor Sie die Konfiguration ersetzen.",
+    "Chiudi l'overlay prima di sostituire la configurazione.", "Cierra el overlay antes de reemplazar la configuración."],
+  "Profil importé, mais l'affichage n'a pas changé ; vérifiez le brouillon.": [
+    "Profile imported, but the view did not change; check the draft.", "Profil importiert, aber die Ansicht wurde nicht gewechselt; prüfen Sie den Entwurf.",
+    "Profilo importato, ma la vista non è cambiata; verifica la bozza.", "Perfil importado, pero la vista no cambió; comprueba el borrador."],
+  "Fermeture annulée : terminez le dialogue ou corrigez les modifications non enregistrées.": [
+    "Close cancelled: finish the dialog or fix unsaved changes.",
+    "Schließen abgebrochen: Dialog abschließen oder nicht gespeicherte Änderungen beheben.",
+    "Chiusura annullata: completa la finestra o correggi le modifiche non salvate.",
+    "Cierre cancelado: termina el diálogo o corrige los cambios sin guardar."],
+  "Enregistrez ou annulez le brouillon de souris ; attendez la fin d'un enregistrement en cours.": [
+    "Save or discard the mouse draft; wait for any save already in progress.",
+    "Mausentwurf speichern oder verwerfen; laufende Speicherung bitte abwarten.",
+    "Salva o annulla la bozza del mouse; attendi il completamento del salvataggio in corso.",
+    "Guarda o descarta el borrador del ratón; espera a que termine cualquier guardado en curso."],
+  "Fermeture annulée : {e}": ["Close cancelled: {e}", "Schließen abgebrochen: {e}", "Chiusura annullata: {e}", "Cierre cancelado: {e}"],
+  "Actualisation annulée : des modifications n'ont pas pu être enregistrées.": [
+    "Reload cancelled: some changes could not be saved.", "Neuladen abgebrochen: Änderungen konnten nicht gespeichert werden.",
+    "Ricaricamento annullato: alcune modifiche non sono state salvate.", "Recarga cancelada: algunos cambios no se pudieron guardar."],
+  // Small draft-recovery panel (only shown when a save is blocked).
+  "VOIR LE BROUILLON": ["VIEW DRAFT", "ENTWURF ANZEIGEN", "MOSTRA BOZZA", "VER BORRADOR"],
+  "BROUILLON NON ENREGISTRÉ": ["UNSAVED DRAFT", "NICHT GESPEICHERTER ENTWURF", "BOZZA NON SALVATA", "BORRADOR NO GUARDADO"],
+  "Ce brouillon n'est conservé qu'en mémoire. Copiez le texte avant de l'abandonner ou réessayez après avoir corrigé le problème.": [
+    "This draft is only kept in memory. Copy the text before discarding it, or retry after fixing the problem.",
+    "Dieser Entwurf liegt nur im Arbeitsspeicher. Kopieren Sie den Text vor dem Verwerfen oder versuchen Sie es nach Behebung des Problems erneut.",
+    "Questa bozza è conservata solo in memoria. Copia il testo prima di scartarla o riprova dopo aver risolto il problema.",
+    "Este borrador solo se conserva en memoria. Copia el texto antes de descartarlo o vuelve a intentarlo después de corregir el problema."],
+  "RÉESSAYER": ["RETRY", "ERNEUT VERSUCHEN", "RIPROVA", "REINTENTAR"],
+  "ABANDONNER LE BROUILLON ET RECHARGER": ["DISCARD DRAFT AND RELOAD", "ENTWURF VERWERFEN UND NEU LADEN", "SCARTA LA BOZZA E RICARICA", "DESCARTAR BORRADOR Y RECARGAR"],
+  "ABANDONNER CE BROUILLON ET RECHARGER ?": ["DISCARD THIS DRAFT AND RELOAD?", "DIESEN ENTWURF VERWERFEN UND NEU LADEN?", "SCARTARE LA BOZZA E RICARICARE?", "¿DESCARTAR EL BORRADOR Y RECARGAR?"],
+  "Le brouillon a changé ; réessayez.": ["The draft changed; try again.", "Der Entwurf hat sich geändert; versuchen Sie es erneut.", "La bozza è cambiata; riprova.", "El borrador ha cambiado; vuelve a intentarlo."],
+  "Brouillon abandonné et profils rechargés": ["Draft discarded and profiles reloaded", "Entwurf verworfen und Profile neu geladen", "Bozza scartata e profili ricaricati", "Borrador descartado y perfiles recargados"],
+  "Rechargement impossible : {e}": ["Reload failed: {e}", "Neuladen fehlgeschlagen: {e}", "Impossibile ricaricare: {e}", "No se pudo recargar: {e}"],
+  "Le profil affiché a changé ; confirmez à nouveau la suppression.": ["The displayed profile changed; confirm deletion again.", "Das angezeigte Profil hat sich geändert; bestätigen Sie das Löschen erneut.", "Il profilo visualizzato è cambiato; conferma di nuovo l'eliminazione.", "El perfil mostrado ha cambiado; confirma de nuevo la eliminación."],
   // ---- header, rails, status -------------------------------------------------------
   "Nouveau profil": ["New profile", "Neues Profil", "Nuovo profilo", "Nuevo perfil"],
   "Dupliquer le profil": ["Duplicate profile", "Profil duplizieren", "Duplica profilo", "Duplicar perfil"],
